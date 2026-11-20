@@ -1,0 +1,179 @@
+"""Endpoint tests for POST /clean/csv."""
+
+import json
+
+from tests.conftest import csv_bytes, upload_csv
+
+
+def test_clean_json_basic_shape(client) -> None:
+    response = upload_csv(client, b"name,email\nAlice,a@x.com\n")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"] == [{"name": "Alice", "email": "a@x.com"}]
+    assert set(body["summary"]) == {
+        "rows_in",
+        "rows_out",
+        "rows_dropped",
+        "fixes_applied",
+    }
+    assert body["summary"]["rows_in"] == 1
+    assert body["summary"]["rows_out"] == 1
+    assert body["summary"]["rows_dropped"] == 0
+
+
+def test_clean_json_all_options_applied(client) -> None:
+    payload = (
+        b"email,dob,signup\n"
+        b"  Alice@Example.COM ,15/03/2024,2024-01-15\n"
+        b"alice@example.com,2024-03-15,not a date\n"
+    )
+    response = upload_csv(
+        client,
+        payload,
+        dedupe_by="email",
+        date_columns=["dob", "signup"],
+        email_columns=["email"],
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"] == [
+        {"email": "alice@example.com", "dob": "2024-03-15", "signup": "2024-01-15"}
+    ]
+    assert body["summary"]["rows_dropped"] == 1
+    assert body["summary"]["fixes_applied"] == {
+        "emails_normalized": 1,
+        "dates_normalized": 3,
+        "unparseable_dates": 1,
+        "duplicates_removed": 1,
+    }
+
+
+def test_clean_csv_output_media_type_headers_and_body(client) -> None:
+    response = upload_csv(client, b"a,b\n1,2\n", output_format="csv")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert response.text.strip() == "a,b\n1,2"
+    assert response.headers["x-rows-in"] == "1"
+    assert response.headers["x-rows-out"] == "1"
+    assert response.headers["x-rows-dropped"] == "0"
+    assert json.loads(response.headers["x-fixes-applied"])["duplicates_removed"] == 0
+    assert 'filename="cleaned.csv"' in response.headers["content-disposition"]
+
+
+def test_clean_empty_file_returns_zero_summary(client) -> None:
+    response = upload_csv(client, b"")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"] == []
+    assert body["summary"]["rows_in"] == 0
+    assert body["summary"]["rows_out"] == 0
+    assert body["summary"]["fixes_applied"]["emails_normalized"] == 0
+
+
+def test_clean_missing_values_are_preserved(client) -> None:
+    response = upload_csv(client, b"a,b\n1,\n,2\n")
+    assert response.status_code == 200
+    assert response.json()["data"] == [
+        {"a": "1", "b": None},
+        {"a": None, "b": "2"},
+    ]
+
+
+def test_clean_duplicate_keys_are_dropped_and_counted(client) -> None:
+    response = upload_csv(
+        client,
+        b"id,name\n1,Alice\n 1 ,Alicia\n2,Bob\n",
+        dedupe_by="id",
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"] == [{"id": "1", "name": "Alice"}, {"id": "2", "name": "Bob"}]
+    assert body["summary"]["rows_in"] == 3
+    assert body["summary"]["rows_out"] == 2
+    assert body["summary"]["fixes_applied"]["duplicates_removed"] == 1
+
+
+def test_clean_latin1_upload(client) -> None:
+    payload = csv_bytes("name,city\nJosé,Zürich\n", encoding="latin-1")
+    response = upload_csv(client, payload)
+    assert response.status_code == 200
+    assert response.json()["data"] == [{"name": "José", "city": "Zürich"}]
+
+
+def test_clean_bom_upload(client) -> None:
+    response = upload_csv(client, csv_bytes("a,b\n1,2\n", bom=True))
+    assert response.status_code == 200
+    assert response.json()["data"] == [{"a": "1", "b": "2"}]
+
+
+def test_clean_unreadable_binary_returns_400(client) -> None:
+    response = upload_csv(client, b"a,b\n\x00,2\n")
+    assert response.status_code == 400
+    assert "binary content" in response.json()["detail"]
+
+
+def test_clean_missing_file_part_returns_422(client) -> None:
+    response = client.post("/clean/csv", data={"output_format": "json"})
+    assert response.status_code == 422
+
+
+def test_clean_invalid_output_format_returns_422(client) -> None:
+    response = upload_csv(client, b"a\n1\n", output_format="yaml")
+    assert response.status_code == 422
+
+
+def test_clean_list_options_via_repeated_form_fields(client) -> None:
+    # Build a raw multipart body so the same form key is sent twice.
+    boundary = "----repeated-field-boundary"
+    body = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="data.csv"\r\n'
+        "Content-Type: text/csv\r\n\r\n"
+        "dob,signup\n15/03/2024,2024-01-15\n"
+        f"\r\n--{boundary}\r\n"
+        'Content-Disposition: form-data; name="date_columns"\r\n\r\n'
+        "dob\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="date_columns"\r\n\r\n'
+        "signup\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+    response = client.post(
+        "/clean/csv",
+        content=body,
+        headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+    )
+    assert response.status_code == 200
+    assert response.json()["data"] == [
+        {"dob": "2024-03-15", "signup": "2024-01-15"}
+    ]
+
+
+def test_clean_list_options_via_json_encoded_string(client) -> None:
+    response = upload_csv(
+        client, b"dob\n15/03/2024\n", date_columns='["dob", "missing"]'
+    )
+    assert response.status_code == 200
+    assert response.json()["data"] == [{"dob": "2024-03-15"}]
+    assert response.json()["summary"]["fixes_applied"]["unknown_columns_ignored"] == 1
+
+
+def test_clean_unknown_columns_are_ignored(client) -> None:
+    response = upload_csv(
+        client,
+        b"a\n1\n",
+        date_columns="nope",
+        email_columns="nada",
+        dedupe_by="ghost",
+    )
+    assert response.status_code == 200
+    assert response.json()["summary"]["fixes_applied"]["unknown_columns_ignored"] == 3
+
+
+def test_clean_options_from_query_string(client) -> None:
+    response = client.post(
+        "/clean/csv?dedupe_by=id&output_format=json",
+        files={"file": ("data.csv", b"id,name\n1,Alice\n1,Alicia\n", "text/csv")},
+    )
+    assert response.status_code == 200
+    assert response.json()["data"] == [{"id": "1", "name": "Alice"}]
