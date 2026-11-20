@@ -221,3 +221,23 @@ def test_clean_oversized_upload_rejected_early(client, monkeypatch) -> None:
     response = upload_csv(client, b"a,b\n" + b"1,2\n" * 20)
     assert response.status_code == 413
     assert "exceeds" in response.json()["detail"]
+
+
+def test_clean_csv_offloads_cpu_work_to_threadpool(client, monkeypatch) -> None:
+    import app.routers.clean as clean_router
+    from fastapi.concurrency import run_in_threadpool
+
+    offloaded: list[str] = []
+    real_run = clean_router.run_in_threadpool
+
+    def spy(func, *args, **kwargs):
+        offloaded.append(getattr(func, "__name__", type(func).__name__))
+        return real_run(func, *args, **kwargs)
+
+    monkeypatch.setattr(clean_router, "run_in_threadpool", spy)
+
+    response = upload_csv(client, b"a,b\n1,2\n")
+    assert response.status_code == 200
+    assert response.json()["data"] == [{"a": "1", "b": "2"}]
+    assert "clean_csv_bytes" in offloaded
+    assert "to_dicts" in offloaded

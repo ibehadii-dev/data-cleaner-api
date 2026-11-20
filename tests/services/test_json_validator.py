@@ -139,3 +139,29 @@ def test_validate_non_dict_record_is_quarantined() -> None:
     result = validate_records(["not an object"], {})
     assert result.quarantined[0].errors == ["record must be a JSON object"]
     assert result.summary.rows_dropped == 1
+
+
+def test_validate_huge_integers_do_not_overflow() -> None:
+    huge = 10**400
+    for kind in ("integer", "number"):
+        rules = {"n": FieldRule(type=kind)}
+        records = [{"n": huge}, {"n": -huge}]
+        result = validate_records(records, rules)
+        assert result.valid == records
+        assert result.quarantined == []
+        assert result.summary.rows_out == 2
+        assert result.summary.rows_dropped == 0
+
+
+def test_validate_overflowing_numeric_string_is_rejected_cleanly() -> None:
+    rules = {"n": FieldRule(type="integer")}
+    result = validate_records([{"n": "1" + "0" * 400}], rules)
+    assert result.valid == []
+    assert len(result.quarantined) == 1
+    assert result.quarantined[0].errors == ["'n' must be a finite number"]
+
+
+def test_validate_integer_rejects_bool_like_int() -> None:
+    rules = {"n": FieldRule(type="integer")}
+    result = validate_records([{"n": True}], rules)
+    assert result.quarantined[0].errors == ["'n' must be a number"]

@@ -1,5 +1,9 @@
 """Endpoint tests for POST /validate/json."""
 
+import inspect
+
+from app.routers.validate import validate_json
+
 FIELD_RULES = {
     "email": {"required": True, "type": "email"},
     "age": {"type": "integer"},
@@ -98,3 +102,9 @@ def test_validate_endpoint_unknown_top_level_key_returns_422(client) -> None:
         json={"records": [], "field_rules": {}, "extra": 1},
     )
     assert response.status_code == 422
+
+
+def test_validate_json_handler_is_synchronous() -> None:
+    # A plain def makes FastAPI run the handler in a threadpool instead of
+    # blocking the event loop with synchronous validation work.
+    assert not inspect.iscoroutinefunction(validate_json)

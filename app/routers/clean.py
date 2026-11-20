@@ -6,6 +6,7 @@ import json
 from typing import Annotated, Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from pydantic import ValidationError
 
@@ -89,7 +90,8 @@ async def clean_csv(
     options = _resolve_options(
         request, dedupe_by, date_columns, email_columns, output_format
     )
-    outcome = clean_csv_bytes(await read_upload_limited(file), options)
+    data = await read_upload_limited(file)
+    outcome = await run_in_threadpool(clean_csv_bytes, data, options)
 
     if options.output_format == "csv":
         summary = outcome.summary
@@ -102,14 +104,16 @@ async def clean_csv(
             "X-Unknown-Columns-Ignored": json.dumps(outcome.ignored_columns),
             "Content-Disposition": 'attachment; filename="cleaned.csv"',
         }
+        content = await run_in_threadpool(render_csv, outcome.frame)
         return Response(
-            content=render_csv(outcome.frame),
+            content=content,
             media_type="text/csv",
             headers=headers,
         )
 
+    data = await run_in_threadpool(outcome.frame.to_dicts)
     return CleanJsonResponse(
-        data=outcome.frame.to_dicts(),
+        data=data,
         summary=outcome.summary,
         quarantined=outcome.quarantined,
     )

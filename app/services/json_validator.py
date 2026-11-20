@@ -35,23 +35,27 @@ def _check_type(value: Any, rule: FieldRule) -> str | None:
             return "must be a valid date"
 
     elif kind in ("number", "integer"):
-        number: float | None = None
         if isinstance(value, bool):
             return "must be a number"
-        if isinstance(value, (int, float)):
-            number = float(value)
-        elif isinstance(value, str):
-            try:
-                number = float(value.strip())
-            except ValueError:
-                return "must be a number"
-        else:
-            return "must be a number"
 
-        if not math.isfinite(number):
-            return "must be a finite number"
-        if kind == "integer" and not number.is_integer():
-            return "must be an integer"
+        try:
+            if isinstance(value, int) and not isinstance(value, bool):
+                # Python ints are arbitrary precision; float(value) would raise
+                # OverflowError for very large values such as 10**400.
+                return None
+            if isinstance(value, float):
+                number = value
+            elif isinstance(value, str):
+                number = float(value.strip())
+            else:
+                return "must be a number"
+
+            if not math.isfinite(number):
+                return "must be a finite number"
+            if kind == "integer" and not number.is_integer():
+                return "must be an integer"
+        except (ValueError, OverflowError, TypeError):
+            return "must be a number"
 
     elif kind == "boolean":
         if isinstance(value, bool):
