@@ -45,6 +45,7 @@ def test_clean_json_all_options_applied(client) -> None:
         "dates_normalized": 3,
         "unparseable_dates": 1,
         "duplicates_removed": 1,
+        "malformed_rows": 0,
     }
 
 
@@ -65,6 +66,7 @@ def test_clean_empty_file_returns_zero_summary(client) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["data"] == []
+    assert body["quarantined"] == []
     assert body["summary"]["rows_in"] == 0
     assert body["summary"]["rows_out"] == 0
     assert body["summary"]["fixes_applied"]["emails_normalized"] == 0
@@ -177,3 +179,45 @@ def test_clean_options_from_query_string(client) -> None:
     )
     assert response.status_code == 200
     assert response.json()["data"] == [{"id": "1", "name": "Alice"}]
+
+
+def test_clean_json_reports_malformed_rows_with_reasons(client) -> None:
+    response = upload_csv(
+        client,
+        b"id,name\n1,Alice\n2,Bob,extra\n1,Alicia\n",
+        dedupe_by="id",
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"] == [{"id": "1", "name": "Alice"}]
+    assert body["quarantined"] == [
+        {
+            "row_index": 1,
+            "record": ["2", "Bob", "extra"],
+            "errors": ["malformed row: expected 2 columns, found 3"],
+        }
+    ]
+    summary = body["summary"]
+    assert summary["rows_in"] == 3
+    assert summary["rows_out"] == 1
+    assert summary["rows_dropped"] == 1
+    assert summary["fixes_applied"]["malformed_rows"] == 1
+    assert summary["rows_in"] == (
+        summary["rows_out"] + summary["rows_dropped"] + len(body["quarantined"])
+    )
+
+
+def test_clean_csv_output_has_quarantine_header(client) -> None:
+    response = upload_csv(client, b"a,b\n1,2,3\n4,5\n", output_format="csv")
+    assert response.status_code == 200
+    assert response.headers["x-quarantined-rows"] == "1"
+    assert response.text.strip() == "a,b\n4,5"
+
+
+def test_clean_oversized_upload_rejected_early(client, monkeypatch) -> None:
+    from app.services import csv_cleaner
+
+    monkeypatch.setattr(csv_cleaner, "MAX_FILE_BYTES", 32)
+    response = upload_csv(client, b"a,b\n" + b"1,2\n" * 20)
+    assert response.status_code == 413
+    assert "exceeds" in response.json()["detail"]

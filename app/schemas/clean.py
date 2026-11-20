@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import field_validator
 
 from ..utils.params import normalize_list_field
-from .common import StrictModel, SummaryReport
+from .common import QuarantinedRecord, StrictModel, SummaryReport
 
 
 class CleanOptions(StrictModel):
@@ -32,3 +32,4 @@ class CleanOptions(StrictModel):
 class CleanJsonResponse(StrictModel):
     data: list[dict[str, Any]]
     summary: SummaryReport
+    quarantined: list[QuarantinedRecord] = []

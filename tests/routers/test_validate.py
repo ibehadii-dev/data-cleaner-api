@@ -22,7 +22,7 @@ def test_validate_endpoint_valid_payload_shape(client) -> None:
     assert body["summary"]["rows_in"] == 1
     assert body["summary"]["rows_out"] == 1
     assert body["summary"]["rows_dropped"] == 0
-    assert body["summary"]["fixes_applied"] == 0
+    assert body["summary"]["fixes_applied"] == {}
     assert body["summary"]["errors_by_field"] == {}
 
 

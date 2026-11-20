@@ -10,6 +10,7 @@ from app.services.csv_cleaner import (
     normalize_dates,
     normalize_emails,
     read_csv_bytes,
+    read_csv_bytes_with_quarantine,
     render_csv,
 )
 from app.utils.errors import CsvReadError
@@ -51,10 +52,19 @@ def test_read_csv_bytes_binary_with_nul_raises() -> None:
         read_csv_bytes(b"a,b\n\x00,2\n")
 
 
-def test_read_csv_bytes_ragged_rows_do_not_crash() -> None:
-    frame = read_csv_bytes(b"a,b\n1,2,3\n4,5\n")
-    assert frame.height == 2
-    assert frame.to_dicts() == [{"a": "1", "b": "2"}, {"a": "4", "b": "5"}]
+def test_read_csv_bytes_ragged_rows_are_quarantined() -> None:
+    frame, quarantined = read_csv_bytes_with_quarantine(b"a,b\n1,2,3\n4,5\n")
+    assert frame.to_dicts() == [{"a": "4", "b": "5"}]
+    assert len(quarantined) == 1
+    assert quarantined[0].row_index == 0
+    assert quarantined[0].record == ["1", "2", "3"]
+    assert quarantined[0].errors == [
+        "malformed row: expected 2 columns, found 3"
+    ]
+    # The plain reader exposes only the well-formed rows.
+    assert read_csv_bytes(b"a,b\n1,2,3\n4,5\n").to_dicts() == [
+        {"a": "4", "b": "5"}
+    ]
 
 
 def test_read_csv_bytes_header_only_has_zero_rows() -> None:
@@ -209,6 +219,7 @@ def test_clean_csv_bytes_summary_counts_are_consistent() -> None:
         "dates_normalized": 2,
         "unparseable_dates": 0,
         "duplicates_removed": 1,
+        "malformed_rows": 0,
     }
     # Dedupe keeps the *first* occurrence after normalisation.
     assert outcome.frame.to_dicts() == [
@@ -229,3 +240,54 @@ def test_clean_csv_bytes_reports_unknown_columns() -> None:
 def test_render_csv_produces_utf8_bytes() -> None:
     frame = pl.DataFrame({"a": ["1"], "b": ["2"]})
     assert render_csv(frame) == b"a,b\n1,2\n"
+
+
+def test_clean_csv_bytes_malformed_rows_reconcile_with_dedupe() -> None:
+    payload = b"id,name\n1,Alice\n2,Bob,extra\n1,Alicia\n3,Carol\n"
+    outcome = clean_csv_bytes(payload, CleanOptions(dedupe_by="id"))
+    assert outcome.frame.to_dicts() == [
+        {"id": "1", "name": "Alice"},
+        {"id": "3", "name": "Carol"},
+    ]
+    assert outcome.summary.rows_in == 4
+    assert outcome.summary.rows_out == 2
+    assert outcome.summary.rows_dropped == 1
+    assert outcome.summary.fixes_applied["malformed_rows"] == 1
+    assert len(outcome.quarantined) == 1
+    assert outcome.quarantined[0].record == ["2", "Bob", "extra"]
+    assert (
+        outcome.summary.rows_in
+        == outcome.summary.rows_out
+        + outcome.summary.rows_dropped
+        + len(outcome.quarantined)
+    )
+
+
+def test_clean_csv_bytes_all_malformed_rows_are_quarantined() -> None:
+    outcome = clean_csv_bytes(b"a,b\n1,2,3\n4\n", CleanOptions())
+    assert outcome.frame.height == 0
+    assert [row.row_index for row in outcome.quarantined] == [0, 1]
+    assert outcome.summary.rows_in == 2
+    assert outcome.summary.rows_out == 0
+    assert outcome.summary.rows_dropped == 0
+    assert outcome.summary.fixes_applied["malformed_rows"] == 2
+
+
+def test_clean_csv_bytes_unparseable_dates_are_counted_not_quarantined() -> None:
+    outcome = clean_csv_bytes(
+        b"d\nnot a date\n2024-01-15\n", CleanOptions(date_columns=["d"])
+    )
+    assert outcome.frame.to_dicts() == [{"d": "not a date"}, {"d": "2024-01-15"}]
+    assert outcome.summary.fixes_applied["unparseable_dates"] == 1
+    assert outcome.quarantined == []
+    assert outcome.summary.rows_in == outcome.summary.rows_out
+
+
+def test_clean_csv_bytes_blank_rows_remain_null_records() -> None:
+    outcome = clean_csv_bytes(b"a,b\n1,2\n\n3,4\n", CleanOptions())
+    assert outcome.frame.to_dicts() == [
+        {"a": "1", "b": "2"},
+        {"a": None, "b": None},
+        {"a": "3", "b": "4"},
+    ]
+    assert outcome.quarantined == []

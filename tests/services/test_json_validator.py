@@ -19,7 +19,7 @@ def test_validate_all_valid() -> None:
     assert result.summary.rows_in == 2
     assert result.summary.rows_out == 2
     assert result.summary.rows_dropped == 0
-    assert result.summary.fixes_applied == 0
+    assert result.summary.fixes_applied == {}
 
 
 def test_validate_multiple_errors_per_record() -> None:

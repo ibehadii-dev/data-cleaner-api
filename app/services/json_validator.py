@@ -115,7 +115,7 @@ def validate_records(
         rows_in=total,
         rows_out=len(valid),
         rows_dropped=len(quarantined),
-        fixes_applied=0,
+        fixes_applied={},
         valid_count=len(valid),
         quarantined_count=len(quarantined),
         errors_by_field=errors_by_field,

@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from .common import StrictModel
+from .common import QuarantinedRecord, StrictModel
 
 
 class FieldRule(StrictModel):
@@ -16,17 +16,11 @@ class ValidateRequest(StrictModel):
     field_rules: dict[str, FieldRule]
 
 
-class QuarantinedRecord(StrictModel):
-    row_index: int
-    record: Any  # may be a non-object value when defence-in-depth quarantines it
-    errors: list[str]
-
-
 class ValidateSummary(StrictModel):
     rows_in: int
     rows_out: int
     rows_dropped: int
-    fixes_applied: int = 0
+    fixes_applied: dict[str, int] = {}
     valid_count: int
     quarantined_count: int
     errors_by_field: dict[str, int] = {}

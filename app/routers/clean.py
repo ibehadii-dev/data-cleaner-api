@@ -11,9 +11,12 @@ from pydantic import ValidationError
 
 from ..schemas.clean import CleanJsonResponse, CleanOptions
 from ..schemas.common import ErrorResponse
+from ..services import csv_cleaner
 from ..services.csv_cleaner import clean_csv_bytes, render_csv
 
 router = APIRouter(prefix="/clean", tags=["clean"])
+
+UPLOAD_CHUNK_BYTES = 64 * 1024
 
 
 def _pick(
@@ -48,11 +51,30 @@ def _resolve_options(
         ) from exc
 
 
+async def read_upload_limited(file: UploadFile) -> bytes:
+    """Read an upload in chunks, rejecting oversized files before buffering."""
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(UPLOAD_CHUNK_BYTES):
+        total += len(chunk)
+        if total > csv_cleaner.MAX_FILE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    "Uploaded CSV exceeds the "
+                    f"{csv_cleaner.MAX_FILE_BYTES // (1024 * 1024)} MB size limit."
+                ),
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post(
     "/csv",
     response_model=CleanJsonResponse,
     responses={
         400: {"model": ErrorResponse, "description": "Unreadable CSV file"},
+        413: {"model": ErrorResponse, "description": "Upload exceeds the size limit"},
         422: {"description": "Invalid option value or missing file part"},
     },
 )
@@ -67,7 +89,7 @@ async def clean_csv(
     options = _resolve_options(
         request, dedupe_by, date_columns, email_columns, output_format
     )
-    outcome = clean_csv_bytes(await file.read(), options)
+    outcome = clean_csv_bytes(await read_upload_limited(file), options)
 
     if options.output_format == "csv":
         summary = outcome.summary
@@ -75,6 +97,7 @@ async def clean_csv(
             "X-Rows-In": str(summary.rows_in),
             "X-Rows-Out": str(summary.rows_out),
             "X-Rows-Dropped": str(summary.rows_dropped),
+            "X-Quarantined-Rows": str(len(outcome.quarantined)),
             "X-Fixes-Applied": json.dumps(summary.fixes_applied, sort_keys=True),
             "X-Unknown-Columns-Ignored": json.dumps(outcome.ignored_columns),
             "Content-Disposition": 'attachment; filename="cleaned.csv"',
@@ -86,5 +109,7 @@ async def clean_csv(
         )
 
     return CleanJsonResponse(
-        data=outcome.frame.to_dicts(), summary=outcome.summary
+        data=outcome.frame.to_dicts(),
+        summary=outcome.summary,
+        quarantined=outcome.quarantined,
     )

@@ -6,13 +6,14 @@ and return DataFrames plus plain counters.
 
 from __future__ import annotations
 
+import csv
 import io
 from dataclasses import dataclass
 
 import polars as pl
 
 from ..schemas.clean import CleanOptions
-from ..schemas.common import SummaryReport
+from ..schemas.common import QuarantinedRecord, SummaryReport
 from ..utils.dates import DATE_FORMATS
 from ..utils.errors import CsvReadError
 
@@ -28,28 +29,25 @@ class CleaningOutcome:
     frame: pl.DataFrame
     summary: SummaryReport
     ignored_columns: list[str]
+    quarantined: list[QuarantinedRecord]
 
 
 # --------------------------------------------------------------------------- #
 # Reading
 # --------------------------------------------------------------------------- #
-def read_csv_bytes(data: bytes) -> pl.DataFrame:
-    """Decode and parse uploaded CSV bytes without ever crashing the caller.
+def decode_csv_bytes(data: bytes) -> str:
+    """Decode uploaded bytes to text, raising CsvReadError on bad input.
 
-    * ``utf-8-sig`` transparently strips a UTF-8 BOM (and accepts no-BOM input).
-    * Latin-1 is used as a fallback for legacy exports.
-    * Empty / BOM-only files produce an empty DataFrame.
-    * Binary content and Polars parse failures raise :class:`CsvReadError`.
+    ``utf-8-sig`` strips an optional BOM; Latin-1 is the legacy fallback.
+    Empty / BOM-only files return an empty string. Upload size limiting is
+    the router's job: it rejects oversized files before buffering them.
     """
     if not isinstance(data, (bytes, bytearray)):
         raise CsvReadError("Uploaded file must be a binary file.")
     data = bytes(data)
 
-    if len(data) > MAX_FILE_BYTES:
-        raise CsvReadError("Uploaded CSV exceeds the 25 MB size limit.")
-
     if not data:
-        return pl.DataFrame()
+        return ""
 
     try:
         text = data.decode("utf-8-sig")
@@ -66,16 +64,82 @@ def read_csv_bytes(data: bytes) -> pl.DataFrame:
     if "\x00" in text:
         raise CsvReadError("Unreadable CSV file: binary content detected.")
     if not text.strip():
-        return pl.DataFrame()
+        return ""
+    return text
+
+
+def _filter_malformed_rows(text: str) -> tuple[str, list[QuarantinedRecord]]:
+    """Split ragged CSV rows out; return clean text and quarantine records.
+
+    Rows whose field count differs from the header are removed from the text
+    handed to Polars and reported with a reason. Blank rows are kept because
+    Polars turns them into all-null records.
+    """
+    try:
+        rows = list(csv.reader(io.StringIO(text, newline="")))
+    except csv.Error as exc:
+        raise CsvReadError(f"Unreadable CSV file: {exc}") from exc
+
+    if not rows or not rows[0]:
+        return "", []
+
+    header, data_rows = rows[0], rows[1:]
+    expected = len(header)
+    kept: list[list[str]] = []
+    quarantined: list[QuarantinedRecord] = []
+
+    for index, row in enumerate(data_rows):
+        if not row or len(row) == expected:
+            kept.append(row)
+            continue
+        quarantined.append(
+            QuarantinedRecord(
+                row_index=index,
+                record=row,
+                errors=[
+                    f"malformed row: expected {expected} columns, found {len(row)}"
+                ],
+            )
+        )
+
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(header)
+    writer.writerows(kept)
+    return buffer.getvalue(), quarantined
+
+
+def read_csv_bytes_with_quarantine(
+    data: bytes,
+) -> tuple[pl.DataFrame, list[QuarantinedRecord]]:
+    """Parse CSV bytes, separating malformed rows from the Polars frame."""
+    text = decode_csv_bytes(data)
+    if not text:
+        return pl.DataFrame(), []
+
+    filtered_text, quarantined = _filter_malformed_rows(text)
+    if not filtered_text:
+        return pl.DataFrame(), quarantined
 
     try:
-        return pl.read_csv(
-            io.BytesIO(text.encode("utf-8")),
+        frame = pl.read_csv(
+            io.BytesIO(filtered_text.encode("utf-8")),
             infer_schema_length=0,  # read every column as String
-            truncate_ragged_lines=True,  # never crash on malformed rows
+            truncate_ragged_lines=True,  # defensive; ragged rows filtered above
         )
     except Exception as exc:  # Polars raises several distinct exception types
         raise CsvReadError(f"Unreadable CSV file: {exc}") from exc
+    return frame, quarantined
+
+
+def read_csv_bytes(data: bytes) -> pl.DataFrame:
+    """Decode and parse uploaded CSV bytes without ever crashing the caller.
+
+    Malformed (ragged) rows are excluded from the frame; use
+    :func:`read_csv_bytes_with_quarantine` to also get their details.
+    """
+    frame, _ = read_csv_bytes_with_quarantine(data)
+    return frame
 
 
 # --------------------------------------------------------------------------- #
@@ -183,9 +247,15 @@ def dedupe(
 # Orchestration / rendering
 # --------------------------------------------------------------------------- #
 def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
-    """Apply all requested transforms and build the canonical summary."""
-    frame = read_csv_bytes(data)
-    rows_in = frame.height
+    """Apply all requested transforms and build the canonical summary.
+
+    The summary reconciles as ``rows_in == rows_out + rows_dropped
+    + len(quarantined)``: malformed rows count in ``rows_in`` but never in
+    ``rows_out``, and ``rows_dropped`` covers dedupe removals only.
+    """
+    frame, quarantined = read_csv_bytes_with_quarantine(data)
+    rows_in = frame.height + len(quarantined)
+    well_formed_rows = frame.height
     ignored: list[str] = []
 
     frame, emails_changed, ignored_emails = normalize_emails(
@@ -208,6 +278,7 @@ def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
         "dates_normalized": dates_normalized,
         "unparseable_dates": unparseable,
         "duplicates_removed": duplicates_removed,
+        "malformed_rows": len(quarantined),
     }
     if missing_keys:
         fixes["rows_missing_dedupe_key"] = missing_keys
@@ -217,10 +288,15 @@ def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
     summary = SummaryReport(
         rows_in=rows_in,
         rows_out=frame.height,
-        rows_dropped=rows_in - frame.height,
+        rows_dropped=well_formed_rows - frame.height,
         fixes_applied=fixes,
     )
-    return CleaningOutcome(frame=frame, summary=summary, ignored_columns=ignored)
+    return CleaningOutcome(
+        frame=frame,
+        summary=summary,
+        ignored_columns=ignored,
+        quarantined=quarantined,
+    )
 
 
 def render_csv(frame: pl.DataFrame) -> bytes:

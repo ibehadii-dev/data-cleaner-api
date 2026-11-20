@@ -1,5 +1,7 @@
 """Models shared across endpoints."""
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict
 
 
@@ -14,6 +16,12 @@ class SummaryReport(StrictModel):
     rows_out: int
     rows_dropped: int
     fixes_applied: dict[str, int] = {}
+
+
+class QuarantinedRecord(StrictModel):
+    row_index: int
+    record: Any  # raw row (list for CSV, object/value for JSON)
+    errors: list[str]
 
 
 class ErrorResponse(StrictModel):
