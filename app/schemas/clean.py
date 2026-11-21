@@ -8,11 +8,36 @@ from ..utils.params import normalize_list_field
 from .common import QuarantinedRecord, StrictModel, SummaryReport
 
 
+_ALLOWED_DELIMITERS = (",", ";", "\t", "|")
+
+
 class CleanOptions(StrictModel):
     dedupe_by: str | None = None
     date_columns: list[str] = []
     email_columns: list[str] = []
     output_format: Literal["json", "csv"] = "json"
+    delimiter: str | None = None
+
+    @field_validator("delimiter", mode="before")
+    @classmethod
+    def normalize_delimiter(cls, value: Any) -> str | None:
+        """Accept one of ``, ; tab |``; allow a literal ``\\t`` from forms."""
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("delimiter must be one of ',', ';', tab or '|'")
+        if value in _ALLOWED_DELIMITERS:
+            return value
+        if value == "\\t":
+            return "\t"
+        text = value.strip()
+        if not text:
+            return None
+        if text == "\\t":
+            return "\t"
+        if text in _ALLOWED_DELIMITERS:
+            return text
+        raise ValueError("delimiter must be one of ',', ';', tab or '|'")
 
     @field_validator("dedupe_by", mode="before")
     @classmethod

@@ -23,6 +23,9 @@ _PARSED_COL = "__clean_date_parsed__"
 _KEY_COL = "__dedupe_key__"
 _ORDER_COL = "__dedupe_order__"
 
+# Delimiters we accept explicitly or sniff from the header.
+CANDIDATE_DELIMITERS: tuple[str, ...] = (",", ";", "\t", "|")
+
 
 @dataclass
 class CleaningOutcome:
@@ -32,15 +35,40 @@ class CleaningOutcome:
     quarantined: list[QuarantinedRecord]
 
 
+@dataclass
+class CsvReadResult:
+    """A parsed frame plus the raw row accounting needed to reconcile it."""
+
+    frame: pl.DataFrame
+    quarantined: list[QuarantinedRecord]
+    rows_in: int
+    blank_rows_skipped: int
+    delimiter: str
+
+
+@dataclass
+class _ParsedRecords:
+    """Header, rewritten data text, and counters from the CSV scanner."""
+
+    header: list[str]
+    text: str
+    quarantined: list[QuarantinedRecord]
+    rows_in: int
+    blank_rows_skipped: int
+    delimiter: str
+
+
 # --------------------------------------------------------------------------- #
 # Reading
 # --------------------------------------------------------------------------- #
 def decode_csv_bytes(data: bytes) -> str:
     """Decode uploaded bytes to text, raising CsvReadError on bad input.
 
-    ``utf-8-sig`` strips an optional BOM; Latin-1 is the legacy fallback.
-    Empty / BOM-only files return an empty string. Upload size limiting is
-    the router's job: it rejects oversized files before buffering them.
+    ``utf-8-sig`` strips an optional BOM. Windows ``cp1252`` is tried before
+    the Latin-1 last resort so smart quotes and typographic punctuation decode
+    into real characters instead of C1 control bytes. Empty / BOM-only files
+    return an empty string. Upload size limiting is the router's job: it
+    rejects oversized files before buffering them.
     """
     if not isinstance(data, (bytes, bytearray)):
         raise CsvReadError("Uploaded file must be a binary file.")
@@ -53,13 +81,19 @@ def decode_csv_bytes(data: bytes) -> str:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
         try:
-            # Latin-1 maps every byte to a valid code point, so this is our
-            # last-resort decoding step for legacy exports.
-            text = data.decode("latin-1")
-        except UnicodeDecodeError as exc:  # defensive: practically unreachable
-            raise CsvReadError(
-                "Unreadable CSV file: could not decode as UTF-8 or Latin-1."
-            ) from exc
+            # Windows exports use cp1252: smart quotes (0x93/0x94), dashes,
+            # ellipses, etc. Latin-1 would silently turn these into controls.
+            text = data.decode("cp1252")
+        except UnicodeDecodeError:
+            try:
+                # Latin-1 maps every byte to a code point; it is the last
+                # resort for legacy files containing cp1252's five gaps.
+                text = data.decode("latin-1")
+            except UnicodeDecodeError as exc:  # defensive: practically unreachable
+                raise CsvReadError(
+                    "Unreadable CSV file: could not decode as UTF-8, "
+                    "Windows-1252 or Latin-1."
+                ) from exc
 
     if "\x00" in text:
         raise CsvReadError("Unreadable CSV file: binary content detected.")
@@ -68,68 +102,186 @@ def decode_csv_bytes(data: bytes) -> str:
     return text
 
 
-def _filter_malformed_rows(text: str) -> tuple[str, list[QuarantinedRecord]]:
-    """Split ragged CSV rows out; return clean text and quarantine records.
-
-    Rows whose field count differs from the header are removed from the text
-    handed to Polars and reported with a reason. Blank rows are kept because
-    Polars turns them into all-null records.
-    """
+def _first_record(text: str, delimiter: str) -> list[str]:
+    """Return the first parsed record of ``text`` for one delimiter."""
     try:
-        rows = list(csv.reader(io.StringIO(text, newline="")))
+        return next(csv.reader(io.StringIO(text, newline=""), delimiter=delimiter))
+    except StopIteration:
+        return []
     except csv.Error as exc:
         raise CsvReadError(f"Unreadable CSV file: {exc}") from exc
 
-    if not rows or not rows[0]:
-        return "", []
 
-    header, data_rows = rows[0], rows[1:]
-    expected = len(header)
-    kept: list[list[str]] = []
-    quarantined: list[QuarantinedRecord] = []
+def _detect_delimiter(text: str, explicit: str | None) -> str:
+    """Use an explicit delimiter when supplied, otherwise sniff the header.
 
-    for index, row in enumerate(data_rows):
-        if not row or len(row) == expected:
-            kept.append(row)
-            continue
-        quarantined.append(
-            QuarantinedRecord(
-                row_index=index,
-                record=row,
-                errors=[
-                    f"malformed row: expected {expected} columns, found {len(row)}"
-                ],
-            )
-        )
-
-    buffer = io.StringIO(newline="")
-    writer = csv.writer(buffer, lineterminator="\n")
-    writer.writerow(header)
-    writer.writerows(kept)
-    return buffer.getvalue(), quarantined
+    The candidate producing the most header fields wins, with ties going to
+    the earlier candidate (so comma is preferred over the exotic ones).
+    """
+    if explicit:
+        return explicit
+    best, best_count = ",", 0
+    for candidate in CANDIDATE_DELIMITERS:
+        header = _first_record(text, candidate)
+        if len(header) > best_count:
+            best, best_count = candidate, len(header)
+    return best
 
 
-def read_csv_bytes_with_quarantine(
-    data: bytes,
-) -> tuple[pl.DataFrame, list[QuarantinedRecord]]:
-    """Parse CSV bytes, separating malformed rows from the Polars frame."""
-    text = decode_csv_bytes(data)
-    if not text:
-        return pl.DataFrame(), []
+def _is_blank_row(row: list[str]) -> bool:
+    """True for a csv.reader empty line or a whitespace-only single field."""
+    return not row or (len(row) == 1 and not row[0].strip())
 
-    filtered_text, quarantined = _filter_malformed_rows(text)
-    if not filtered_text:
-        return pl.DataFrame(), quarantined
+
+def _filter_malformed_rows(text: str, delimiter: str | None = None) -> _ParsedRecords:
+    """Scan the CSV and stream well-formed rows into a clean text buffer.
+
+    Blank records are skipped and counted; ragged records are quarantined with
+    a reason. Keeping only one row in memory at a time (rather than
+    ``list(csv.reader(...))``) keeps peak memory close to the upload size.
+    Duplicate or delimiter-conflicting headers are rejected with CsvReadError,
+    which the app maps to HTTP 400.
+    """
+    chosen = _detect_delimiter(text, delimiter)
 
     try:
+        reader = csv.reader(io.StringIO(text, newline=""), delimiter=chosen)
+        raw_header = next(reader)
+    except StopIteration:
+        return _ParsedRecords([], "", [], 0, 0, chosen)
+    except csv.Error as exc:
+        raise CsvReadError(f"Unreadable CSV file: {exc}") from exc
+
+    header = [cell.strip() for cell in raw_header]
+    if not header:
+        return _ParsedRecords([], "", [], 0, 0, chosen)
+
+    duplicates = sorted({name for name in header if header.count(name) > 1})
+    if duplicates:
+        raise CsvReadError(
+            "Unreadable CSV file: duplicate column headers: "
+            + ", ".join(duplicates)
+        )
+
+    # A one-column header containing a delimiter means the wrong separator was
+    # chosen. Never let this parse "successfully" as a single ignored column.
+    if len(header) == 1 and any(marker in header[0] for marker in (";", "\t")):
+        found = "tab" if "\t" in header[0] else ";"
+        raise CsvReadError(
+            "Unreadable CSV file: single-column header contains a "
+            f"delimiter ({found}); supply a matching 'delimiter' option or a "
+            "properly delimited header."
+        )
+
+    expected = len(header)
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, delimiter=chosen, lineterminator="\n")
+    writer.writerow(header)
+
+    quarantined: list[QuarantinedRecord] = []
+    rows_in = 0
+    blank_rows_skipped = 0
+
+    try:
+        for row in reader:
+            rows_in += 1
+            if _is_blank_row(row):
+                blank_rows_skipped += 1
+                continue
+            if len(row) != expected:
+                quarantined.append(
+                    QuarantinedRecord(
+                        row_index=rows_in - 1,
+                        record=row,
+                        errors=[
+                            f"malformed row: expected {expected} columns, "
+                            f"found {len(row)}"
+                        ],
+                    )
+                )
+                continue
+            writer.writerow(row)
+    except csv.Error as exc:
+        raise CsvReadError(f"Unreadable CSV file: {exc}") from exc
+
+    return _ParsedRecords(
+        header=header,
+        text=buffer.getvalue(),
+        quarantined=quarantined,
+        rows_in=rows_in,
+        blank_rows_skipped=blank_rows_skipped,
+        delimiter=chosen,
+    )
+
+
+def read_csv_with_report(
+    data: bytes, delimiter: str | None = None
+) -> CsvReadResult:
+    """Parse CSV bytes into a reconciled frame plus raw row accounting."""
+    text = decode_csv_bytes(data)
+    if not text:
+        return CsvReadResult(pl.DataFrame(), [], 0, 0, delimiter or ",")
+
+    parsed = _filter_malformed_rows(text, delimiter)
+    del text
+
+    if not parsed.text:
+        return CsvReadResult(
+            pl.DataFrame(),
+            parsed.quarantined,
+            parsed.rows_in,
+            parsed.blank_rows_skipped,
+            parsed.delimiter,
+        )
+
+    clean_text = parsed.text
+    try:
         frame = pl.read_csv(
-            io.BytesIO(filtered_text.encode("utf-8")),
+            io.BytesIO(clean_text.encode("utf-8")),
             infer_schema_length=0,  # read every column as String
             truncate_ragged_lines=True,  # defensive; ragged rows filtered above
+            separator=parsed.delimiter,
         )
     except Exception as exc:  # Polars raises several distinct exception types
         raise CsvReadError(f"Unreadable CSV file: {exc}") from exc
-    return frame, quarantined
+    del clean_text
+
+    # Strip header whitespace so email/date/dedupe options match their columns.
+    frame = frame.rename({c: c.strip() for c in frame.columns})
+
+    # Shape check on the frame itself: no per-row Python materialisation.
+    if frame.width != len(parsed.header):
+        raise CsvReadError(
+            "Unreadable CSV file: column count mismatch: parsed "
+            f"{frame.width} columns but the header has {len(parsed.header)}."
+        )
+
+    # Reconcile against the *input* records, never against the frame alone.
+    expected = parsed.rows_in - len(parsed.quarantined) - parsed.blank_rows_skipped
+    if frame.height != expected:
+        raise CsvReadError(
+            "Unreadable CSV file: row count mismatch: parsed "
+            f"{frame.height} rows but expected {expected} "
+            f"(records={parsed.rows_in}, quarantined="
+            f"{len(parsed.quarantined)}, blank_rows_skipped="
+            f"{parsed.blank_rows_skipped})."
+        )
+
+    return CsvReadResult(
+        frame=frame,
+        quarantined=parsed.quarantined,
+        rows_in=parsed.rows_in,
+        blank_rows_skipped=parsed.blank_rows_skipped,
+        delimiter=parsed.delimiter,
+    )
+
+
+def read_csv_bytes_with_quarantine(
+    data: bytes, delimiter: str | None = None
+) -> tuple[pl.DataFrame, list[QuarantinedRecord]]:
+    """Parse CSV bytes, separating malformed rows from the Polars frame."""
+    result = read_csv_with_report(data, delimiter)
+    return result.frame, result.quarantined
 
 
 def read_csv_bytes(data: bytes) -> pl.DataFrame:
@@ -249,12 +401,18 @@ def dedupe(
 def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
     """Apply all requested transforms and build the canonical summary.
 
-    The summary reconciles as ``rows_in == rows_out + rows_dropped
-    + len(quarantined)``: malformed rows count in ``rows_in`` but never in
-    ``rows_out``, and ``rows_dropped`` covers dedupe removals only.
+    ``rows_in`` comes from the raw input records, not from the frame. The
+    summary reconciles as ``rows_in == rows_out + rows_dropped +
+    len(quarantined)``: malformed and blank rows count in ``rows_in`` but never
+    in ``rows_out``, so both are accounted for in ``rows_dropped``.
     """
-    frame, quarantined = read_csv_bytes_with_quarantine(data)
-    rows_in = frame.height + len(quarantined)
+    result = read_csv_with_report(data, options.delimiter)
+    del data
+
+    rows_in = result.rows_in
+    blank_rows_skipped = result.blank_rows_skipped
+    quarantined = result.quarantined
+    frame = result.frame
     well_formed_rows = frame.height
     ignored: list[str] = []
 
@@ -288,7 +446,8 @@ def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
     summary = SummaryReport(
         rows_in=rows_in,
         rows_out=frame.height,
-        rows_dropped=well_formed_rows - frame.height,
+        rows_dropped=(well_formed_rows - frame.height) + blank_rows_skipped,
+        blank_rows_skipped=blank_rows_skipped,
         fixes_applied=fixes,
     )
     return CleaningOutcome(

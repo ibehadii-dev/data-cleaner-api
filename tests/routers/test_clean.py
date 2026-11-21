@@ -14,6 +14,7 @@ def test_clean_json_basic_shape(client) -> None:
         "rows_in",
         "rows_out",
         "rows_dropped",
+        "blank_rows_skipped",
         "fixes_applied",
     }
     assert body["summary"]["rows_in"] == 1
@@ -240,4 +241,108 @@ def test_clean_csv_offloads_cpu_work_to_threadpool(client, monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["data"] == [{"a": "1", "b": "2"}]
     assert "clean_csv_bytes" in offloaded
-    assert "to_dicts" in offloaded
+    assert "write_json" in offloaded
+
+
+def test_clean_cp1252_upload_decodes_smart_quotes(client) -> None:
+    payload = "name\n\u201chello\u201d\n".encode("cp1252")
+    response = upload_csv(client, payload)
+    assert response.status_code == 200
+    assert response.json()["data"] == [{"name": "\u201chello\u201d"}]
+
+
+def test_clean_semicolon_delimited_upload(client) -> None:
+    response = upload_csv(
+        client,
+        b"id;email\n1;A@X.COM\n",
+        email_columns=["email"],
+    )
+    assert response.status_code == 200
+    assert response.json()["data"] == [{"id": "1", "email": "a@x.com"}]
+
+
+def test_clean_tab_delimited_upload(client) -> None:
+    response = upload_csv(client, b"id\tname\n1\tAlice\n")
+    assert response.status_code == 200
+    assert response.json()["data"] == [{"id": "1", "name": "Alice"}]
+
+
+def test_clean_delimiter_option(client) -> None:
+    response = upload_csv(client, b"id;name\n1;Alice\n", delimiter=";")
+    assert response.status_code == 200
+    assert response.json()["data"] == [{"id": "1", "name": "Alice"}]
+
+
+def test_clean_invalid_delimiter_returns_422(client) -> None:
+    response = upload_csv(client, b"a\n1\n", delimiter=":")
+    assert response.status_code == 422
+
+
+def test_clean_single_column_delimited_header_returns_400(client) -> None:
+    response = upload_csv(client, b"id;name\n1;Alice\n", delimiter=",")
+    assert response.status_code == 400
+    assert "single-column header" in response.json()["detail"]
+
+
+def test_clean_header_whitespace_does_not_defeat_options(client) -> None:
+    response = upload_csv(
+        client,
+        b" email , dob \n A@X.COM ,15/03/2024\n",
+        email_columns=["email"],
+        date_columns=["dob"],
+    )
+    assert response.status_code == 200
+    assert response.json()["data"] == [{"email": "a@x.com", "dob": "2024-03-15"}]
+
+
+def test_clean_duplicate_headers_return_400(client) -> None:
+    response = upload_csv(client, b"a,a,b\n1,2,3\n")
+    assert response.status_code == 400
+    assert "duplicate column headers" in response.json()["detail"]
+
+
+def test_clean_blank_rows_skipped_and_reported(client) -> None:
+    response = upload_csv(client, b"a,b\n1,2\n\n3,4\n")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"] == [{"a": "1", "b": "2"}, {"a": "3", "b": "4"}]
+    summary = body["summary"]
+    assert summary["rows_in"] == 3
+    assert summary["rows_out"] == 2
+    assert summary["rows_dropped"] == 1
+    assert summary["blank_rows_skipped"] == 1
+
+
+def test_clean_csv_output_has_blank_rows_header(client) -> None:
+    response = upload_csv(client, b"a,b\n1,2\n\n3,4\n", output_format="csv")
+    assert response.status_code == 200
+    assert response.headers["x-blank-rows-skipped"] == "1"
+    assert response.text.strip() == "a,b\n1,2\n3,4"
+
+
+def test_clean_json_does_not_materialise_records_with_to_dicts(client, monkeypatch) -> None:
+    import polars as pl
+
+    def forbidden(self):
+        raise AssertionError("to_dicts should not be called in JSON mode")
+
+    monkeypatch.setattr(pl.DataFrame, "to_dicts", forbidden)
+    response = upload_csv(client, b"a,b\n1,2\n")
+    assert response.status_code == 200
+    assert response.json() == {
+        "data": [{"a": "1", "b": "2"}],
+        "summary": {
+            "rows_in": 1,
+            "rows_out": 1,
+            "rows_dropped": 0,
+            "blank_rows_skipped": 0,
+            "fixes_applied": {
+                "emails_normalized": 0,
+                "dates_normalized": 0,
+                "unparseable_dates": 0,
+                "duplicates_removed": 0,
+                "malformed_rows": 0,
+            },
+        },
+        "quarantined": [],
+    }

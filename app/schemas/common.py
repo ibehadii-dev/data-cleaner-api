@@ -15,6 +15,7 @@ class SummaryReport(StrictModel):
     rows_in: int
     rows_out: int
     rows_dropped: int
+    blank_rows_skipped: int = 0
     fixes_applied: dict[str, int] = {}
 
 

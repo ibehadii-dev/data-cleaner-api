@@ -37,6 +37,7 @@ def _resolve_options(
     date_columns: list[str] | None,
     email_columns: list[str] | None,
     output_format: str | None,
+    delimiter: str | None,
 ) -> CleanOptions:
     query = request.query_params
     try:
@@ -45,10 +46,14 @@ def _resolve_options(
             date_columns=_pick("date_columns", date_columns, query),
             email_columns=_pick("email_columns", email_columns, query),
             output_format=_pick("output_format", output_format, query) or "json",
+            delimiter=_pick("delimiter", delimiter, query),
         )
     except ValidationError as exc:
+        # Context values can hold raw exception objects (e.g. our delimiter
+        # validator), which JSONResponse cannot serialise.
         raise HTTPException(
-            status_code=422, detail=exc.errors(include_url=False)
+            status_code=422,
+            detail=exc.errors(include_url=False, include_context=False),
         ) from exc
 
 
@@ -86,12 +91,14 @@ async def clean_csv(
     date_columns: Annotated[list[str] | None, Form()] = None,
     email_columns: Annotated[list[str] | None, Form()] = None,
     output_format: Annotated[str | None, Form()] = None,
+    delimiter: Annotated[str | None, Form()] = None,
 ) -> Any:
     options = _resolve_options(
-        request, dedupe_by, date_columns, email_columns, output_format
+        request, dedupe_by, date_columns, email_columns, output_format, delimiter
     )
     data = await read_upload_limited(file)
     outcome = await run_in_threadpool(clean_csv_bytes, data, options)
+    del data  # the frame and summary are all that remain of the upload
 
     if options.output_format == "csv":
         summary = outcome.summary
@@ -99,6 +106,7 @@ async def clean_csv(
             "X-Rows-In": str(summary.rows_in),
             "X-Rows-Out": str(summary.rows_out),
             "X-Rows-Dropped": str(summary.rows_dropped),
+            "X-Blank-Rows-Skipped": str(summary.blank_rows_skipped),
             "X-Quarantined-Rows": str(len(outcome.quarantined)),
             "X-Fixes-Applied": json.dumps(summary.fixes_applied, sort_keys=True),
             "X-Unknown-Columns-Ignored": json.dumps(outcome.ignored_columns),
@@ -111,9 +119,21 @@ async def clean_csv(
             headers=headers,
         )
 
-    data = await run_in_threadpool(outcome.frame.to_dicts)
-    return CleanJsonResponse(
-        data=data,
-        summary=outcome.summary,
-        quarantined=outcome.quarantined,
+    # Stream Polars' own row-oriented JSON straight into the response body.
+    # Building to_dicts() plus a second Pydantic list would double peak memory.
+    records_json = await run_in_threadpool(outcome.frame.write_json)
+    summary_json = outcome.summary.model_dump_json()
+    quarantined_json = json.dumps(
+        [row.model_dump(mode="json") for row in outcome.quarantined],
+        ensure_ascii=False,
     )
+    body = (
+        '{"data":'
+        + records_json
+        + ',"summary":'
+        + summary_json
+        + ',"quarantined":'
+        + quarantined_json
+        + "}"
+    )
+    return Response(content=body, media_type="application/json")

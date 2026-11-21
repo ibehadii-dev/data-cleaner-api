@@ -4,8 +4,10 @@ import polars as pl
 import pytest
 
 from app.schemas.clean import CleanOptions
+from app.services import csv_cleaner
 from app.services.csv_cleaner import (
     clean_csv_bytes,
+    decode_csv_bytes,
     dedupe,
     normalize_dates,
     normalize_emails,
@@ -71,6 +73,87 @@ def test_read_csv_bytes_header_only_has_zero_rows() -> None:
     frame = read_csv_bytes(b"a,b\n")
     assert frame.height == 0
     assert frame.columns == ["a", "b"]
+
+
+def test_decode_csv_bytes_prefers_cp1252_over_latin1() -> None:
+    payload = "name\n\u201chello\u201d\n".encode("cp1252")
+    # cp1252 maps 0x93/0x94 to smart quotes; Latin-1 would yield C1 controls.
+    assert "\u201chello\u201d" in decode_csv_bytes(payload)
+    assert read_csv_bytes(payload).to_dicts() == [{"name": "\u201chello\u201d"}]
+
+
+def test_read_csv_bytes_sniffs_semicolon_delimiter() -> None:
+    frame = read_csv_bytes(b"id;email;joined\n1;a@x.com;2024-01-15\n")
+    assert frame.columns == ["id", "email", "joined"]
+    assert frame.to_dicts() == [
+        {"id": "1", "email": "a@x.com", "joined": "2024-01-15"}
+    ]
+
+
+def test_read_csv_bytes_sniffs_tab_delimiter() -> None:
+    frame = read_csv_bytes(b"id\tname\n1\tAlice\n")
+    assert frame.columns == ["id", "name"]
+    assert frame.to_dicts() == [{"id": "1", "name": "Alice"}]
+
+
+def test_read_csv_bytes_sniffs_pipe_delimiter() -> None:
+    payload = "id|city\n1|Z\u00fcrich\n".encode("utf-8")
+    frame = read_csv_bytes(payload)
+    assert frame.columns == ["id", "city"]
+    assert frame.to_dicts() == [{"id": "1", "city": "Z\u00fcrich"}]
+
+
+def test_explicit_delimiter_option_overrides_sniffing() -> None:
+    outcome = clean_csv_bytes(
+        b"id;name\n1;Alice\n", CleanOptions(delimiter=";")
+    )
+    assert outcome.frame.columns == ["id", "name"]
+    assert outcome.frame.to_dicts() == [{"id": "1", "name": "Alice"}]
+
+
+def test_literal_backslash_t_delimiter_is_accepted() -> None:
+    assert CleanOptions(delimiter="\\t").delimiter == "\t"
+    frame = read_csv_bytes(b"id\tname\n1\tAlice\n")
+    assert frame.columns == ["id", "name"]
+
+
+def test_invalid_delimiter_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        CleanOptions(delimiter=":")
+
+
+def test_single_column_header_with_semicolon_raises() -> None:
+    with pytest.raises(CsvReadError, match="single-column header"):
+        read_csv_bytes_with_quarantine(b"a;b\n1;2\n", delimiter=",")
+
+
+def test_single_column_header_with_tab_raises() -> None:
+    with pytest.raises(CsvReadError, match="single-column header"):
+        clean_csv_bytes(b"a\tb\n1\t2\n", CleanOptions(delimiter=","))
+
+
+def test_header_whitespace_is_stripped_so_options_apply() -> None:
+    outcome = clean_csv_bytes(
+        b" email , dob \n A@X.COM , 15/03/2024 \n",
+        CleanOptions(email_columns=["email"], date_columns=["dob"]),
+    )
+    assert outcome.frame.columns == ["email", "dob"]
+    assert outcome.frame.to_dicts() == [
+        {"email": "a@x.com", "dob": "2024-03-15"}
+    ]
+    assert outcome.summary.fixes_applied["emails_normalized"] == 1
+    assert outcome.summary.fixes_applied["dates_normalized"] == 1
+    assert outcome.ignored_columns == []
+
+
+def test_duplicate_headers_raise_csv_read_error() -> None:
+    with pytest.raises(CsvReadError, match="duplicate column headers"):
+        clean_csv_bytes(b"a,a,b\n1,2,3\n", CleanOptions())
+
+
+def test_headers_duplicate_after_whitespace_stripping_raise() -> None:
+    with pytest.raises(CsvReadError, match="duplicate column headers"):
+        clean_csv_bytes(b"a, a,b\n1,2,3\n", CleanOptions())
 
 
 # --------------------------------------------------------------------------- #
@@ -283,11 +366,51 @@ def test_clean_csv_bytes_unparseable_dates_are_counted_not_quarantined() -> None
     assert outcome.summary.rows_in == outcome.summary.rows_out
 
 
-def test_clean_csv_bytes_blank_rows_remain_null_records() -> None:
+def test_clean_csv_bytes_blank_rows_are_skipped_and_counted() -> None:
     outcome = clean_csv_bytes(b"a,b\n1,2\n\n3,4\n", CleanOptions())
     assert outcome.frame.to_dicts() == [
         {"a": "1", "b": "2"},
-        {"a": None, "b": None},
         {"a": "3", "b": "4"},
     ]
     assert outcome.quarantined == []
+    assert outcome.summary.rows_in == 3
+    assert outcome.summary.rows_out == 2
+    assert outcome.summary.rows_dropped == 1
+    assert outcome.summary.blank_rows_skipped == 1
+    assert (
+        outcome.summary.rows_in
+        == outcome.summary.rows_out
+        + outcome.summary.rows_dropped
+        + len(outcome.quarantined)
+    )
+
+
+def test_whitespace_only_lines_are_counted_as_blank_rows() -> None:
+    outcome = clean_csv_bytes(b"a,b\n1,2\n   \n\n3,4\n", CleanOptions())
+    assert outcome.frame.to_dicts() == [
+        {"a": "1", "b": "2"},
+        {"a": "3", "b": "4"},
+    ]
+    assert outcome.summary.rows_in == 4
+    assert outcome.summary.blank_rows_skipped == 2
+    assert outcome.summary.rows_dropped == 2
+
+
+def test_blank_lines_are_not_mistaken_for_malformed_rows() -> None:
+    outcome = clean_csv_bytes(b"a,b\n\n1,2\n\n", CleanOptions())
+    assert outcome.quarantined == []
+    assert outcome.summary.rows_in == 3
+    assert outcome.summary.blank_rows_skipped == 2
+    assert outcome.summary.rows_out == 1
+
+
+def test_row_count_mismatch_raises_csv_read_error(monkeypatch) -> None:
+    real_read_csv = csv_cleaner.pl.read_csv
+
+    def duplicated_read_csv(*args, **kwargs):
+        frame = real_read_csv(*args, **kwargs)
+        return csv_cleaner.pl.concat([frame, frame])
+
+    monkeypatch.setattr(csv_cleaner.pl, "read_csv", duplicated_read_csv)
+    with pytest.raises(CsvReadError, match="row count mismatch"):
+        clean_csv_bytes(b"a,b\n1,2\n", CleanOptions())
