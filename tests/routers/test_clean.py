@@ -579,3 +579,155 @@ def test_demo_messy_leads_reads_repo_sample_when_present(client, monkeypatch, tm
     response = client.post("/demo/messy-leads")
     assert response.status_code == 200
     assert response.json()["data"] == [{"x": "1", "y": "2"}]
+
+
+def test_clean_phone_columns_accept_comma_string_and_repeated_fields(client) -> None:
+    payload = b"phone,mobile\n(415) 555-2671,202-555-2671\nbad,(415) 555-2671\n"
+    comma = upload_csv(client, payload, phone_columns="phone,mobile")
+    repeated = client.post(
+        "/clean/csv",
+        files={"file": ("data.csv", payload, "text/csv")},
+        data={"phone_columns": ["phone", "mobile"]},
+    )
+    assert comma.status_code == repeated.status_code == 200
+    comma_body, repeated_body = comma.json(), repeated.json()
+    for payload_body in (comma_body, repeated_body):
+        payload_body["summary"].pop("processing_time_ms")
+    assert comma_body == repeated_body
+    body = comma.json()
+    assert body["data"][0] == {
+        "phone": "+14155552671",
+        "mobile": "+12025552671",
+    }
+    assert body["quarantined"][0]["record"] == ["bad", "(415) 555-2671"]
+    assert body["summary"]["fixes_applied"]["phones_normalized"] == 2
+
+
+def test_clean_default_country_code_is_case_insensitive(client) -> None:
+    response = upload_csv(
+        client,
+        b"phone\n020 7946 0958\n",
+        phone_columns="phone",
+        default_country_code="gb",
+    )
+    assert response.status_code == 200
+    assert response.json()["data"] == [{"phone": "+442079460958"}]
+
+    invalid = upload_csv(
+        client,
+        b"phone\nnope\n",
+        phone_columns="phone",
+        default_country_code="gb",
+    )
+    assert invalid.json()["quarantined"][0]["errors"] == [
+        "Invalid phone number for region GB: nope"
+    ]
+
+
+def test_clean_preset_via_form_and_query(client) -> None:
+    payload = (
+        b"Email,Phone Number,Create Date\n"
+        b" A@X.COM ,(415) 555-2671,15/03/2024\n"
+        b"a@x.com,202-555-2671,2024-02-01\n"
+    )
+    via_form = upload_csv(client, payload, preset="hubspot")
+    via_query = client.post(
+        "/clean/csv?preset=hubspot",
+        files={"file": ("data.csv", payload, "text/csv")},
+    )
+    assert via_form.status_code == via_query.status_code == 200
+    form_body, query_body = via_form.json(), via_query.json()
+    for payload_body in (form_body, query_body):
+        payload_body["summary"].pop("processing_time_ms")
+    assert form_body == query_body
+    body = via_form.json()
+    assert len(body["data"]) == 1
+    assert body["data"][0]["Email"] == "a@x.com"
+    assert body["data"][0]["Phone Number"] == "+14155552671"
+    assert body["data"][0]["Create Date"] == "2024-03-15"
+    assert body["summary"]["fixes_applied"]["duplicates_removed"] == 1
+
+
+def test_clean_preset_does_not_override_explicit_options(client) -> None:
+    payload = b"Email,Contact Email\nA@X.COM,b@y.com\n"
+    response = upload_csv(
+        client, payload, preset="hubspot", email_columns="Missing Column"
+    )
+    assert response.status_code == 200
+    body = response.json()
+    # The explicit (unknown) column wins; the preset must not add "Email".
+    assert body["data"] == [{"Email": "A@X.COM", "Contact Email": "b@y.com"}]
+    assert body["summary"]["warnings"]["unknown_columns"] == ["Missing Column"]
+
+
+def test_clean_zip_bundle_contains_three_files_and_reconciles(client) -> None:
+    payload = b"email,phone,v\nA@X.COM,(415) 555-2671,=1+1\nbad,badphone,x\n"
+    response = upload_csv(
+        client, payload, output_format="zip", phone_columns="phone"
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/zip")
+    assert 'filename="cleaned_bundle.zip"' in response.headers["content-disposition"]
+    assert float(response.headers["x-processing-time-ms"]) >= 0
+
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert set(archive.namelist()) == {
+            "cleaned.csv",
+            "quarantined.csv",
+            "summary.json",
+        }
+        summary = json.loads(archive.read("summary.json"))
+        assert summary["rows_in"] == 2
+        assert summary["rows_out"] == 1
+        assert summary["rows_dropped"] == 0
+        assert summary["rows_in"] == (
+            summary["rows_out"] + summary["rows_dropped"] + 1
+        )
+        assert "'=1+1" in archive.read("cleaned.csv").decode("utf-8")
+        quarantine_rows = list(
+            csv.reader(io.StringIO(archive.read("quarantined.csv").decode("utf-8")))
+        )
+    assert quarantine_rows[0] == ["row_index", "errors", "email", "phone", "v"]
+    assert quarantine_rows[1] == [
+        "1",
+        "Invalid phone number for region US: badphone",
+        "bad",
+        "badphone",
+        "x",
+    ]
+
+
+def test_clean_zip_bundle_quarantined_file_is_header_only_when_empty(client) -> None:
+    response = upload_csv(client, b"a,b\n1,2\n", output_format="zip")
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.read("quarantined.csv") == b"row_index,errors,a,b\n"
+        summary = json.loads(archive.read("summary.json"))
+        assert summary["rows_in"] == summary["rows_out"] == 1
+
+
+def test_clean_empty_file_with_phone_options_in_zip_mode(client) -> None:
+    response = upload_csv(client, b"", phone_columns="phone", output_format="zip")
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert set(archive.namelist()) == {
+            "cleaned.csv",
+            "quarantined.csv",
+            "summary.json",
+        }
+        assert json.loads(archive.read("summary.json"))["rows_in"] == 0
+
+
+def test_demo_messy_leads_zip_mode(client) -> None:
+    response = client.post("/demo/messy-leads?output_format=zip")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/zip")
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert set(archive.namelist()) == {
+            "cleaned.csv",
+            "quarantined.csv",
+            "summary.json",
+        }
+        summary = json.loads(archive.read("summary.json"))
+        assert summary["rows_in"] == 7
+        assert summary["rows_out"] == 3

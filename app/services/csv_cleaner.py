@@ -9,9 +9,11 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import polars as pl
 
@@ -19,12 +21,15 @@ from ..schemas.clean import CleanOptions
 from ..schemas.common import QuarantinedRecord, SummaryReport, WarningSummary
 from ..utils.dates import AMBIGUOUS_DATE_FORMATS, UNAMBIGUOUS_DATE_FORMATS
 from ..utils.errors import CsvReadError
+from ..utils.phones import normalize_phone_e164
 
 MAX_FILE_BYTES = 25 * 1024 * 1024
 _TRIM_COL = "__clean_date_trimmed__"
 _PARSED_COL = "__clean_date_parsed__"
 _KEY_COL = "__dedupe_key__"
 _ORDER_COL = "__dedupe_order__"
+_SOURCE_ROW_COL = "__source_row__"
+_PHONE_KEEP_COL = "__phone_keep__"
 
 # Delimiters we accept explicitly or sniff from the header.
 CANDIDATE_DELIMITERS: tuple[str, ...] = (",", ";", "\t", "|")
@@ -47,6 +52,9 @@ class CsvReadResult:
     rows_in: int
     blank_rows_skipped: int
     delimiter: str
+    # 0-based raw data-row index (header excluded) for every frame row. Used
+    # to give phone quarantines the same index convention as malformed rows.
+    source_rows: list[int]
 
 
 @dataclass
@@ -59,6 +67,7 @@ class _ParsedRecords:
     rows_in: int
     blank_rows_skipped: int
     delimiter: str
+    source_rows: list[int]
 
 
 # --------------------------------------------------------------------------- #
@@ -151,13 +160,13 @@ def _filter_malformed_rows(text: str, delimiter: str | None = None) -> _ParsedRe
         reader = csv.reader(io.StringIO(text, newline=""), delimiter=chosen)
         raw_header = next(reader)
     except StopIteration:
-        return _ParsedRecords([], "", [], 0, 0, chosen)
+        return _ParsedRecords([], "", [], 0, 0, chosen, [])
     except csv.Error as exc:
         raise CsvReadError(f"Unreadable CSV file: {exc}") from exc
 
     header = [cell.strip() for cell in raw_header]
     if not header:
-        return _ParsedRecords([], "", [], 0, 0, chosen)
+        return _ParsedRecords([], "", [], 0, 0, chosen, [])
 
     duplicates = sorted({name for name in header if header.count(name) > 1})
     if duplicates:
@@ -182,6 +191,7 @@ def _filter_malformed_rows(text: str, delimiter: str | None = None) -> _ParsedRe
     writer.writerow(header)
 
     quarantined: list[QuarantinedRecord] = []
+    source_rows: list[int] = []
     rows_in = 0
     blank_rows_skipped = 0
 
@@ -203,6 +213,7 @@ def _filter_malformed_rows(text: str, delimiter: str | None = None) -> _ParsedRe
                     )
                 )
                 continue
+            source_rows.append(rows_in - 1)
             writer.writerow(row)
     except csv.Error as exc:
         raise CsvReadError(f"Unreadable CSV file: {exc}") from exc
@@ -214,6 +225,7 @@ def _filter_malformed_rows(text: str, delimiter: str | None = None) -> _ParsedRe
         rows_in=rows_in,
         blank_rows_skipped=blank_rows_skipped,
         delimiter=chosen,
+        source_rows=source_rows,
     )
 
 
@@ -223,7 +235,7 @@ def read_csv_with_report(
     """Parse CSV bytes into a reconciled frame plus raw row accounting."""
     text = decode_csv_bytes(data)
     if not text:
-        return CsvReadResult(pl.DataFrame(), [], 0, 0, delimiter or ",")
+        return CsvReadResult(pl.DataFrame(), [], 0, 0, delimiter or ",", [])
 
     parsed = _filter_malformed_rows(text, delimiter)
     del text
@@ -235,6 +247,7 @@ def read_csv_with_report(
             parsed.rows_in,
             parsed.blank_rows_skipped,
             parsed.delimiter,
+            parsed.source_rows,
         )
 
     clean_text = parsed.text
@@ -276,6 +289,7 @@ def read_csv_with_report(
         rows_in=parsed.rows_in,
         blank_rows_skipped=parsed.blank_rows_skipped,
         delimiter=parsed.delimiter,
+        source_rows=parsed.source_rows,
     )
 
 
@@ -453,6 +467,126 @@ def dedupe(
     return reduced, before - reduced.height, missing_key, []
 
 
+def normalize_phones(
+    frame: pl.DataFrame,
+    columns: list[str],
+    default_region: str = "US",
+) -> tuple[pl.DataFrame, int, list[str], list[QuarantinedRecord]]:
+    """Normalize phone columns to E.164, quarantining rows with invalid values.
+
+    Runs on the freshly parsed frame so quarantined records keep their raw
+    values. ``__source_row__`` (when present) supplies the original 0-based
+    data-row index for each quarantine. Never uses ``to_dicts()``: the JSON
+    response path relies on Polars' own serializer to keep peak memory low.
+    """
+    ignored: list[str] = []
+    valid_columns: list[str] = []
+    for column in columns:
+        if column in frame.columns:
+            valid_columns.append(column)
+        else:
+            ignored.append(column)
+    if not valid_columns:
+        return frame, 0, ignored, []
+
+    headers = [name for name in frame.columns if name != _SOURCE_ROW_COL]
+    positions = {name: index for index, name in enumerate(headers)}
+    if _SOURCE_ROW_COL in frame.columns:
+        source_rows = frame[_SOURCE_ROW_COL].to_list()
+    else:
+        source_rows = list(range(frame.height))
+
+    updates: dict[str, list[str | None]] = {name: [] for name in valid_columns}
+    keep: list[bool] = []
+    quarantined: list[QuarantinedRecord] = []
+    changed_cells = 0
+
+    for offset, raw_row in enumerate(frame.select(headers).iter_rows()):
+        record = list(raw_row)
+        errors: list[str] = []
+        normalized_row: dict[str, str | None] = {}
+        row_changed = 0
+
+        for column in valid_columns:
+            value = record[positions[column]]
+            normalized, was_changed, error = normalize_phone_e164(
+                value, default_region
+            )
+            if error is not None:
+                errors.append(error)
+                continue
+            normalized_row[column] = normalized
+            row_changed += int(was_changed)
+
+        if errors:
+            keep.append(False)
+            quarantined.append(
+                QuarantinedRecord(
+                    row_index=int(source_rows[offset]),
+                    record=record,
+                    errors=errors,
+                )
+            )
+            for column in valid_columns:
+                updates[column].append(record[positions[column]])
+            continue
+
+        keep.append(True)
+        changed_cells += row_changed
+        for column in valid_columns:
+            updates[column].append(normalized_row[column])
+
+    frame = frame.with_columns(
+        [pl.Series(name, updates[name], dtype=pl.String) for name in valid_columns]
+    )
+    frame = frame.with_columns(pl.Series(_PHONE_KEEP_COL, keep, dtype=pl.Boolean))
+    return (
+        frame.filter(pl.col(_PHONE_KEEP_COL)).drop(_PHONE_KEEP_COL),
+        changed_cells,
+        ignored,
+        quarantined,
+    )
+
+
+# Only fill fields the caller left empty; explicit values always win.
+PRESET_COLUMNS: dict[str, dict[str, tuple[str, ...]]] = {
+    "hubspot": {
+        "email_columns": ("Email",),
+        "date_columns": ("Create Date", "Last Activity Date"),
+        "phone_columns": ("Phone Number", "Mobile Phone Number"),
+    },
+    "salesforce": {
+        "email_columns": ("Email",),
+        "date_columns": ("CreatedDate", "LastModifiedDate"),
+        "phone_columns": ("Phone", "MobilePhone"),
+    },
+}
+
+
+def apply_preset(options: CleanOptions, headers: Sequence[str]) -> CleanOptions:
+    """Resolve CRM preset defaults against the CSV's stripped header names."""
+    if options.preset is None:
+        return options
+
+    explicit = options.model_fields_set
+    updates: dict[str, Any] = {}
+    for field, candidates in PRESET_COLUMNS[options.preset].items():
+        if field in explicit and getattr(options, field):
+            continue
+        matched = [name for name in candidates if name in headers]
+        if matched:
+            updates[field] = matched
+
+    if "dedupe_by" not in explicit and not options.dedupe_by and "Email" in headers:
+        updates["dedupe_by"] = "Email"
+    if "dedupe_ignore_case" not in explicit:
+        updates["dedupe_ignore_case"] = True
+
+    if not updates:
+        return options
+    return options.model_copy(update=updates)
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration / rendering
 # --------------------------------------------------------------------------- #
@@ -467,13 +601,27 @@ def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
     t0 = time.perf_counter()
     result = read_csv_with_report(data, options.delimiter)
     del data
+    options = apply_preset(options, result.frame.columns)
 
     rows_in = result.rows_in
     blank_rows_skipped = result.blank_rows_skipped
-    quarantined = result.quarantined
+    quarantined = list(result.quarantined)
     frame = result.frame
     well_formed_rows = frame.height
     ignored: list[str] = []
+
+    # Carry the original data-row index through the phone transform, then drop
+    # it so it can never leak into JSON records or rendered CSV output.
+    frame = frame.with_columns(
+        pl.Series(_SOURCE_ROW_COL, result.source_rows, dtype=pl.Int64)
+    )
+    frame, phones_changed, ignored_phones, phone_quarantines = normalize_phones(
+        frame, options.phone_columns, options.default_country_code
+    )
+    quarantined.extend(phone_quarantines)
+    quarantined.sort(key=lambda row: row.row_index)
+    ignored.extend(ignored_phones)
+    frame = frame.drop(_SOURCE_ROW_COL)
 
     frame, emails_changed, ignored_emails = normalize_emails(
         frame, options.email_columns
@@ -496,6 +644,8 @@ def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
         "unparseable_dates": unparseable,
         "duplicates_removed": duplicates_removed,
     }
+    if options.phone_columns:
+        fixes["phones_normalized"] = phones_changed
     if ambiguous:
         fixes["ambiguous_dates"] = ambiguous
     if missing_keys:
@@ -511,7 +661,11 @@ def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
     summary = SummaryReport(
         rows_in=rows_in,
         rows_out=frame.height,
-        rows_dropped=(well_formed_rows - frame.height) + blank_rows_skipped,
+        # Phone quarantines are already in len(quarantined), so exclude them
+        # from rows_dropped or the reconciliation invariant would double count.
+        rows_dropped=(well_formed_rows - frame.height)
+        - len(phone_quarantines)
+        + blank_rows_skipped,
         blank_rows_skipped=blank_rows_skipped,
         fixes_applied=fixes,
         warnings=warnings,
@@ -562,5 +716,34 @@ def render_quarantined_csv(quarantined: list[QuarantinedRecord]) -> bytes:
                 json.dumps(row.record, ensure_ascii=False),
                 json.dumps(row.errors, ensure_ascii=False),
             ]
+        )
+    return buffer.getvalue().encode("utf-8")
+
+
+def _escape_formula_cell(value: Any) -> Any:
+    """Mirror ``render_csv``'s protection for individually written cells."""
+    if isinstance(value, str) and re.match(_FORMULA_PREFIX_RE, value):
+        return "'" + value
+    return value
+
+
+def render_bundle_quarantined_csv(
+    quarantined: list[QuarantinedRecord], headers: Sequence[str]
+) -> bytes:
+    """Render quarantined.csv for the three-file ZIP bundle.
+
+    Columns are ``row_index, errors, *original_headers``; an empty quarantine
+    list still produces the header-only file. Cell values get the same formula
+    injection protection as cleaned CSV output.
+    """
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(["row_index", "errors", *headers])
+    for row in quarantined:
+        record = row.record if isinstance(row.record, (list, tuple)) else [row.record]
+        cells = [_escape_formula_cell(value) for value in record[: len(headers)]]
+        cells.extend([""] * (len(headers) - len(cells)))
+        writer.writerow(
+            [row.row_index, _escape_formula_cell("; ".join(row.errors)), *cells]
         )
     return buffer.getvalue().encode("utf-8")

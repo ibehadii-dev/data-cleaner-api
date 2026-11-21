@@ -9,13 +9,16 @@ import pytest
 from app.schemas.clean import CleanOptions
 from app.services import csv_cleaner
 from app.services.csv_cleaner import (
+    apply_preset,
     clean_csv_bytes,
     decode_csv_bytes,
     dedupe,
     normalize_dates,
     normalize_emails,
+    normalize_phones,
     read_csv_bytes,
     read_csv_bytes_with_quarantine,
+    render_bundle_quarantined_csv,
     render_csv,
     render_quarantined_csv,
 )
@@ -563,3 +566,197 @@ def test_render_quarantined_csv_preserves_reasons() -> None:
     assert rows_out[1][0] == "1"
     assert rows_out[1][1] == '["2", "Bob", "extra"]'
     assert rows_out[1][2] == '["malformed row: expected 2 columns, found 3"]'
+
+
+def test_normalize_phones_formats_valid_values_and_reports_unknown_columns() -> None:
+    frame = pl.DataFrame(
+        {
+            "phone": ["(415) 555-2671", None, "", "+14155552671"],
+            "note": ["a", "b", "c", "d"],
+        }
+    )
+    result, changed, ignored, quarantined = normalize_phones(
+        frame, ["phone", "missing"], "US"
+    )
+    assert result["phone"].to_list() == [
+        "+14155552671",
+        None,
+        None,
+        "+14155552671",
+    ]
+    assert changed == 1
+    assert ignored == ["missing"]
+    assert quarantined == []
+
+
+def test_normalize_phones_quarantines_invalid_rows_with_original_index() -> None:
+    frame = pl.DataFrame(
+        {
+            "__source_row__": [0, 2, 4],
+            "name": ["A", "B", "C"],
+            "phone": ["(415) 555-2671", "badphone", None],
+        }
+    )
+    result, changed, ignored, quarantined = normalize_phones(
+        frame, ["phone"], "US"
+    )
+    assert result["name"].to_list() == ["A", "C"]
+    assert changed == 1
+    assert ignored == []
+    assert len(quarantined) == 1
+    assert quarantined[0].row_index == 2
+    assert quarantined[0].record == ["B", "badphone"]
+    assert quarantined[0].errors == [
+        "Invalid phone number for region US: badphone"
+    ]
+
+
+def test_clean_csv_bytes_phone_options_reconcile_and_count_fixes() -> None:
+    payload = b"name,phone\nA,(415) 555-2671\nB,badphone\nC,\n"
+    outcome = clean_csv_bytes(payload, CleanOptions(phone_columns=["phone"]))
+    assert outcome.frame.to_dicts() == [
+        {"name": "A", "phone": "+14155552671"},
+        {"name": "C", "phone": None},
+    ]
+    assert outcome.summary.fixes_applied["phones_normalized"] == 1
+    assert [row.row_index for row in outcome.quarantined] == [1]
+    assert outcome.quarantined[0].record == ["B", "badphone"]
+    summary = outcome.summary
+    assert summary.rows_in == 3
+    assert summary.rows_out == 2
+    assert summary.rows_dropped == 0  # quarantines are not "dropped" rows
+    assert summary.rows_in == (
+        summary.rows_out + summary.rows_dropped + len(outcome.quarantined)
+    )
+
+
+def test_clean_csv_bytes_uses_default_country_code_for_phones() -> None:
+    outcome = clean_csv_bytes(
+        b"phone\n020 7946 0958\n",
+        CleanOptions(phone_columns=["phone"], default_country_code="gb"),
+    )
+    assert outcome.frame.to_dicts() == [{"phone": "+442079460958"}]
+    assert outcome.summary.fixes_applied["phones_normalized"] == 1
+
+
+def test_clean_csv_bytes_empty_and_header_only_with_phone_columns() -> None:
+    for payload, blank_rows in ((b"", 0), (b"phone\n", 0), (b"phone\n\n", 1)):
+        outcome = clean_csv_bytes(payload, CleanOptions(phone_columns=["phone"]))
+        assert outcome.frame.height == 0
+        assert outcome.quarantined == []
+        assert outcome.summary.blank_rows_skipped == blank_rows
+        assert outcome.summary.rows_in == blank_rows
+        assert outcome.summary.rows_out == 0
+        assert outcome.summary.rows_dropped == blank_rows
+        assert outcome.summary.rows_in == (
+            outcome.summary.rows_out + outcome.summary.rows_dropped
+        )
+
+
+def test_clean_csv_bytes_reports_unknown_phone_columns() -> None:
+    outcome = clean_csv_bytes(
+        b"a,b\n1,2\n", CleanOptions(phone_columns=["nope"])
+    )
+    assert outcome.summary.warnings.unknown_columns == ["nope"]
+    assert outcome.summary.fixes_applied["phones_normalized"] == 0
+
+
+def test_apply_preset_hubspot_matches_headers() -> None:
+    resolved = apply_preset(
+        CleanOptions(preset="hubspot"),
+        ["Email", "Create Date", "Last Activity Date", "Phone Number", "Mobile Phone Number"],
+    )
+    assert resolved.email_columns == ["Email"]
+    assert resolved.date_columns == ["Create Date", "Last Activity Date"]
+    assert resolved.phone_columns == ["Phone Number", "Mobile Phone Number"]
+    assert resolved.dedupe_by == "Email"
+    assert resolved.dedupe_ignore_case is True
+
+
+def test_apply_preset_salesforce_matches_headers() -> None:
+    resolved = apply_preset(
+        CleanOptions(preset="salesforce"),
+        ["Email", "CreatedDate", "LastModifiedDate", "Phone", "MobilePhone"],
+    )
+    assert resolved.email_columns == ["Email"]
+    assert resolved.date_columns == ["CreatedDate", "LastModifiedDate"]
+    assert resolved.phone_columns == ["Phone", "MobilePhone"]
+    assert resolved.dedupe_by == "Email"
+    assert resolved.dedupe_ignore_case is True
+
+
+def test_apply_preset_respects_explicit_options() -> None:
+    resolved = apply_preset(
+        CleanOptions(
+            preset="hubspot",
+            email_columns=["Contact Email"],
+            dedupe_by="Phone Number",
+            dedupe_ignore_case=False,
+        ),
+        ["Email", "Create Date", "Phone Number"],
+    )
+    assert resolved.email_columns == ["Contact Email"]
+    assert resolved.dedupe_by == "Phone Number"
+    assert resolved.dedupe_ignore_case is False
+    assert resolved.phone_columns == ["Phone Number"]
+
+
+def test_clean_csv_bytes_hubspot_preset_cleans_all_mapped_columns() -> None:
+    payload = (
+        b"Email,Phone Number,Create Date\n"
+        b" A@X.COM ,(415) 555-2671,15/03/2024\n"
+        b"a@x.com,202-555-0173,2024-02-01\n"
+    )
+    outcome = clean_csv_bytes(payload, CleanOptions(preset="hubspot"))
+    assert outcome.frame.to_dicts() == [
+        {"Email": "a@x.com", "Phone Number": "+14155552671", "Create Date": "2024-03-15"}
+    ]
+    assert outcome.summary.fixes_applied["duplicates_removed"] == 1
+    assert outcome.summary.fixes_applied["phones_normalized"] == 2
+    assert outcome.summary.rows_in == 2
+    assert outcome.summary.rows_out == 1
+    assert outcome.summary.rows_dropped == 1
+
+
+def test_clean_csv_bytes_salesforce_preset_cleans_all_mapped_columns() -> None:
+    payload = (
+        b"Email,Phone,MobilePhone,CreatedDate\n"
+        b"A@X.COM,(415) 555-2671,,2024-01-15\n"
+        b"b@y.com,,202-555-2671,2024-02-01\n"
+    )
+    outcome = clean_csv_bytes(
+        payload, CleanOptions(preset="salesforce", default_country_code="US")
+    )
+    assert outcome.frame.to_dicts() == [
+        {
+            "Email": "a@x.com",
+            "Phone": "+14155552671",
+            "MobilePhone": None,
+            "CreatedDate": "2024-01-15",
+        },
+        {
+            "Email": "b@y.com",
+            "Phone": None,
+            "MobilePhone": "+12025552671",
+            "CreatedDate": "2024-02-01",
+        },
+    ]
+    assert outcome.summary.fixes_applied["phones_normalized"] == 2
+
+
+def test_render_bundle_quarantined_csv_is_header_only_when_empty() -> None:
+    assert render_bundle_quarantined_csv([], ["email", "phone"]) == (
+        b"row_index,errors,email,phone\n"
+    )
+
+
+def test_render_bundle_quarantined_csv_escapes_formulas() -> None:
+    rows = [
+        QuarantinedRecord(
+            row_index=3, record=["=1+1", "badphone"], errors=["bad phone"]
+        )
+    ]
+    text = render_bundle_quarantined_csv(rows, ["email", "phone"]).decode("utf-8")
+    parsed = list(csv.reader(io.StringIO(text)))
+    assert parsed[0] == ["row_index", "errors", "email", "phone"]
+    assert parsed[1] == ["3", "bad phone", "'=1+1", "badphone"]

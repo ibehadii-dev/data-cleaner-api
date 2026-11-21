@@ -18,6 +18,7 @@ from ..services import csv_cleaner
 from ..services.csv_cleaner import (
     CleaningOutcome,
     clean_csv_bytes,
+    render_bundle_quarantined_csv,
     render_csv,
     render_quarantined_csv,
 )
@@ -57,25 +58,40 @@ def _resolve_options(
     date_columns: list[str] | None,
     date_dayfirst: str | None,
     email_columns: list[str] | None,
+    phone_columns: list[str] | None,
+    default_country_code: str | None,
+    preset: str | None,
     output_format: str | None,
     delimiter: str | None,
     include_quarantined: str | None,
 ) -> CleanOptions:
     query = request.query_params
-    ignore_case = _pick("dedupe_ignore_case", dedupe_ignore_case, query)
-    dayfirst = _pick("date_dayfirst", date_dayfirst, query)
-    quarantine = _pick("include_quarantined", include_quarantined, query)
+    supplied: dict[str, Any] = {
+        "dedupe_by": _pick("dedupe_by", dedupe_by, query),
+        "dedupe_ignore_case": _pick("dedupe_ignore_case", dedupe_ignore_case, query),
+        "date_columns": _pick_list("date_columns", date_columns, query),
+        "date_dayfirst": _pick("date_dayfirst", date_dayfirst, query),
+        "email_columns": _pick_list("email_columns", email_columns, query),
+        "phone_columns": _pick_list("phone_columns", phone_columns, query),
+        "default_country_code": _pick(
+            "default_country_code", default_country_code, query
+        ),
+        "preset": _pick("preset", preset, query),
+        "output_format": _pick("output_format", output_format, query),
+        "delimiter": _pick("delimiter", delimiter, query),
+        "include_quarantined": _pick(
+            "include_quarantined", include_quarantined, query
+        ),
+    }
+    # Pass only options the caller actually supplied: model_fields_set is then
+    # a reliable signal for preset defaults (explicit values always win).
+    values = {
+        name: value
+        for name, value in supplied.items()
+        if value not in (None, "", [])
+    }
     try:
-        return CleanOptions(
-            dedupe_by=_pick("dedupe_by", dedupe_by, query),
-            dedupe_ignore_case=False if ignore_case is None else ignore_case,
-            date_columns=_pick_list("date_columns", date_columns, query),
-            date_dayfirst=True if dayfirst is None else dayfirst,
-            email_columns=_pick_list("email_columns", email_columns, query),
-            output_format=_pick("output_format", output_format, query) or "json",
-            delimiter=_pick("delimiter", delimiter, query),
-            include_quarantined=False if quarantine is None else quarantine,
-        )
+        return CleanOptions(**values)
     except ValidationError as exc:
         # Context values can hold raw exception objects (e.g. our delimiter
         # validator), which JSONResponse cannot serialise.
@@ -119,12 +135,12 @@ async def read_upload_limited(file: UploadFile) -> bytes:
     return b"".join(chunks)
 
 
-def _build_quarantine_zip(cleaned: bytes, quarantined: bytes) -> bytes:
-    """Bundle the cleaned data and its quarantine report into one download."""
+def _build_zip(entries: dict[str, bytes]) -> bytes:
+    """Build an in-memory, deflate-compressed ZIP from named byte entries."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("cleaned.csv", cleaned)
-        archive.writestr("quarantined.csv", quarantined)
+        for name, content in entries.items():
+            archive.writestr(name, content)
     return buffer.getvalue()
 
 
@@ -140,6 +156,28 @@ async def build_clean_response(
     """
     summary = outcome.summary
     timing_header = {"X-Processing-Time-Ms": str(summary.processing_time_ms)}
+
+    if output_format == "zip":
+        cleaned = await run_in_threadpool(render_csv, outcome.frame)
+        details = await run_in_threadpool(
+            render_bundle_quarantined_csv, outcome.quarantined, outcome.frame.columns
+        )
+        content = await run_in_threadpool(
+            _build_zip,
+            {
+                "cleaned.csv": cleaned,
+                "quarantined.csv": details,
+                "summary.json": summary.model_dump_json(indent=2).encode("utf-8"),
+            },
+        )
+        return Response(
+            content=content,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": 'attachment; filename="cleaned_bundle.zip"',
+                **timing_header,
+            },
+        )
 
     if output_format == "csv":
         headers = {
@@ -159,7 +197,9 @@ async def build_clean_response(
             details = await run_in_threadpool(
                 render_quarantined_csv, outcome.quarantined
             )
-            content = await run_in_threadpool(_build_quarantine_zip, cleaned, details)
+            content = await run_in_threadpool(
+                _build_zip, {"cleaned.csv": cleaned, "quarantined.csv": details}
+            )
             zip_headers = dict(headers)
             zip_headers["Content-Disposition"] = 'attachment; filename="cleaned.zip"'
             return Response(
@@ -209,6 +249,9 @@ async def clean_csv(
     date_columns: Annotated[list[str] | None, Form()] = None,
     date_dayfirst: Annotated[str | None, Form()] = None,
     email_columns: Annotated[list[str] | None, Form()] = None,
+    phone_columns: Annotated[list[str] | None, Form()] = None,
+    default_country_code: Annotated[str | None, Form()] = None,
+    preset: Annotated[str | None, Form()] = None,
     output_format: Annotated[str | None, Form()] = None,
     delimiter: Annotated[str | None, Form()] = None,
     include_quarantined: Annotated[str | None, Form()] = None,
@@ -220,6 +263,9 @@ async def clean_csv(
         date_columns,
         date_dayfirst,
         email_columns,
+        phone_columns,
+        default_country_code,
+        preset,
         output_format,
         delimiter,
         include_quarantined,

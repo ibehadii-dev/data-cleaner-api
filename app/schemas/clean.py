@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from ..utils.params import normalize_list_field
 from .common import QuarantinedRecord, StrictModel, SummaryReport
@@ -17,7 +17,10 @@ class CleanOptions(StrictModel):
     date_columns: list[str] = []
     date_dayfirst: bool = True
     email_columns: list[str] = []
-    output_format: Literal["json", "csv"] = "json"
+    phone_columns: list[str] = Field(default_factory=list)
+    default_country_code: str = Field(default="US", min_length=2, max_length=2)
+    preset: Literal["hubspot", "salesforce"] | None = None
+    output_format: Literal["json", "csv", "zip"] = "json"
     delimiter: str | None = None
     include_quarantined: bool = False
 
@@ -51,10 +54,17 @@ class CleanOptions(StrictModel):
             return value.strip()
         return value
 
-    @field_validator("date_columns", "email_columns", mode="before")
+    @field_validator("date_columns", "email_columns", "phone_columns", mode="before")
     @classmethod
     def coerce_list(cls, value: Any) -> list[str]:
         return normalize_list_field(value) or []
+
+    @field_validator("default_country_code", mode="before")
+    @classmethod
+    def uppercase_country_code(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip().upper()
+        return value
 
 
 class CleanJsonResponse(StrictModel):

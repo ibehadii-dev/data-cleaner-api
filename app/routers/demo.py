@@ -45,15 +45,18 @@ def load_demo_csv_bytes() -> bytes:
     summary="Clean the bundled messy-leads sample",
     responses={
         200: {
-            "description": "Cleaned leads as JSON, or CSV when output_format=csv",
-            "content": {"text/csv": {}},
+            "description": (
+                "Cleaned leads as JSON, CSV or a three-file ZIP bundle "
+                "depending on output_format"
+            ),
+            "content": {"text/csv": {}, "application/zip": {}},
         },
         422: {"description": "Invalid output_format value"},
     },
 )
 async def demo_messy_leads(
     request: Request,
-    output_format: Annotated[Literal["json", "csv"] | None, Form()] = None,
+    output_format: Annotated[Literal["json", "csv", "zip"] | None, Form()] = None,
 ) -> Any:
     """Clean the demo leads with the canonical RevOps option set.
 
