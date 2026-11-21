@@ -37,8 +37,10 @@ Multipart CSV upload. Options may be sent as form fields or as query parameters 
 | Option | Purpose |
 | --- | --- |
 | `phone_columns` | Repeated field naming columns whose phone numbers are normalised. |
+| `company_columns` | Repeated field naming columns whose company names are tidied (legal suffixes such as `Inc.`/`LLC` stripped); changes are counted as `fixes_applied.companies_normalized`. |
+| `fuzzy_dedupe` | When `true`, `dedupe_by` keys are compared as normalised entity names, so `Acme Corp.` and `ACME, Inc.` collapse onto the first row; blank keys stay untouched. |
 | `default_country_code` | Two-letter country code used when normalising phones (default `US`; normalised to upper case). |
-| `preset` | `hubspot` or `salesforce`. Auto-detects email, date and phone columns from known CRM headers; explicitly supplied options always win. |
+| `preset` | `hubspot` or `salesforce`. Auto-detects email, date, phone and company columns from known CRM headers; explicitly supplied options always win. |
 | `output_format` | `json` (default), `csv`, or `zip`. |
 
 `output_format=json` returns `{data, summary, quarantined}`. `output_format=csv` downloads `cleaned.csv` (add `include_quarantined=true` to get a ZIP with `cleaned.csv` + `quarantined.csv`). `output_format=zip` downloads a bundle containing:

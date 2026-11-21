@@ -19,6 +19,7 @@ import polars as pl
 
 from ..schemas.clean import CleanOptions
 from ..schemas.common import QuarantinedRecord, SummaryReport, WarningSummary
+from ..utils.companies import fuzzy_entity_key, normalize_company_name
 from ..utils.dates import AMBIGUOUS_DATE_FORMATS, UNAMBIGUOUS_DATE_FORMATS
 from ..utils.errors import CsvReadError
 from ..utils.phones import normalize_phone_e164
@@ -334,6 +335,33 @@ def normalize_emails(
     return frame, changed_count, ignored
 
 
+def normalize_companies(
+    frame: pl.DataFrame, columns: list[str]
+) -> tuple[pl.DataFrame, int, list[str]]:
+    """Strip legal suffixes and tidy the given company-name string columns.
+
+    Uses a pure-Python normaliser per cell (standard library ``re``), then
+    counts changed cells with a Polars expression. Nulls stay null; unknown
+    columns are reported for the summary's ``unknown_columns`` warning.
+    """
+    ignored: list[str] = []
+    changed_count = 0
+
+    for column in columns:
+        if column not in frame.columns:
+            ignored.append(column)
+            continue
+        original = pl.col(column).cast(pl.String)
+        cleaned = original.map_elements(
+            lambda value: normalize_company_name(value)[0], return_dtype=pl.String
+        )
+        changed = (cleaned != original).fill_null(False)
+        changed_count += int(frame.select(changed.sum()).item() or 0)
+        frame = frame.with_columns(cleaned.alias(column))
+
+    return frame, changed_count, ignored
+
+
 def _date_exprs(
     expression: pl.Expr, formats: Sequence[str]
 ) -> tuple[pl.Expr, pl.Expr]:
@@ -435,24 +463,33 @@ def normalize_dates(
 
 
 def dedupe(
-    frame: pl.DataFrame, column: str | None, ignore_case: bool = False
+    frame: pl.DataFrame,
+    column: str | None,
+    ignore_case: bool = False,
+    fuzzy: bool = False,
 ) -> tuple[pl.DataFrame, int, int, list[str]]:
-    """Keep the first row per trimmed key, preserving case unless asked not to.
+    """Keep the first row per key, preserving case unless asked not to.
 
-    Null and blank/whitespace-only keys are all kept: they are reported as
-    missing rather than collapsed into one duplicate. Returns the reduced
-    frame, the number of rows removed, the number of rows with a missing key,
-    and any unknown column names.
+    With ``fuzzy=True`` the key is a normalised company entity key (legal
+    suffixes and punctuation removed, lowercased), so entity variants collapse
+    onto the first row. Null and blank/whitespace-only keys are always kept and
+    reported as missing rather than collapsed. Returns the reduced frame, the
+    number of rows removed, the number of rows with a missing key, and any
+    unknown column names.
     """
     if column is None:
         return frame, 0, 0, []
     if column not in frame.columns:
         return frame, 0, 0, [column]
 
-    key = pl.col(column).cast(pl.String).str.strip_chars()
-    if ignore_case:
-        key = key.str.to_lowercase()
-    key = pl.when(key == "").then(None).otherwise(key)
+    original = pl.col(column).cast(pl.String)
+    if fuzzy:
+        key = original.map_elements(fuzzy_entity_key, return_dtype=pl.String)
+    else:
+        key = original.str.strip_chars()
+        if ignore_case:
+            key = key.str.to_lowercase()
+        key = pl.when(key == "").then(None).otherwise(key)
 
     missing_key = int(frame.select(key.is_null().sum()).item() or 0)
     before = frame.height
@@ -554,11 +591,13 @@ PRESET_COLUMNS: dict[str, dict[str, tuple[str, ...]]] = {
         "email_columns": ("Email",),
         "date_columns": ("Create Date", "Last Activity Date"),
         "phone_columns": ("Phone Number", "Mobile Phone Number"),
+        "company_columns": ("Company Name",),
     },
     "salesforce": {
         "email_columns": ("Email",),
         "date_columns": ("CreatedDate", "LastModifiedDate"),
         "phone_columns": ("Phone", "MobilePhone"),
+        "company_columns": ("Company", "Account Name"),
     },
 }
 
@@ -633,8 +672,16 @@ def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
     )
     ignored.extend(ignored_dates)
 
+    frame, companies_changed, ignored_companies = normalize_companies(
+        frame, options.company_columns
+    )
+    ignored.extend(ignored_companies)
+
     frame, duplicates_removed, missing_keys, ignored_dedupe = dedupe(
-        frame, options.dedupe_by, ignore_case=options.dedupe_ignore_case
+        frame,
+        options.dedupe_by,
+        ignore_case=options.dedupe_ignore_case,
+        fuzzy=options.fuzzy_dedupe,
     )
     ignored.extend(ignored_dedupe)
 
@@ -646,6 +693,8 @@ def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
     }
     if options.phone_columns:
         fixes["phones_normalized"] = phones_changed
+    if options.company_columns:
+        fixes["companies_normalized"] = companies_changed
     if ambiguous:
         fixes["ambiguous_dates"] = ambiguous
     if missing_keys:

@@ -731,3 +731,107 @@ def test_demo_messy_leads_zip_mode(client) -> None:
         summary = json.loads(archive.read("summary.json"))
         assert summary["rows_in"] == 7
         assert summary["rows_out"] == 3
+
+
+# --------------------------------------------------------------------------- #
+# Company normalization / fuzzy deduplication
+# --------------------------------------------------------------------------- #
+def test_clean_company_columns_accept_comma_string_and_repeated_fields(client) -> None:
+    payload = b"company,name\nAcme Inc.,A\nBeta LLC,B\n"
+    comma = upload_csv(client, payload, company_columns="company,ghost")
+    repeated = client.post(
+        "/clean/csv",
+        files={"file": ("data.csv", payload, "text/csv")},
+        data={"company_columns": ["company", "ghost"]},
+    )
+    assert comma.status_code == repeated.status_code == 200
+    comma_body, repeated_body = comma.json(), repeated.json()
+    for payload_body in (comma_body, repeated_body):
+        payload_body["summary"].pop("processing_time_ms")
+    assert comma_body == repeated_body
+
+    body = comma.json()
+    assert body["data"] == [
+        {"company": "Acme", "name": "A"},
+        {"company": "Beta", "name": "B"},
+    ]
+    assert body["summary"]["fixes_applied"]["companies_normalized"] == 2
+    assert body["summary"]["warnings"]["unknown_columns"] == ["ghost"]
+
+
+def test_clean_company_columns_via_repeated_query_params(client) -> None:
+    response = client.post(
+        "/clean/csv?company_columns=company&company_columns=ghost",
+        files={
+            "file": (
+                "data.csv",
+                b"company\nAcme Inc.\n",
+                "text/csv",
+            )
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"] == [{"company": "Acme"}]
+    assert body["summary"]["warnings"]["unknown_columns"] == ["ghost"]
+
+
+def test_clean_fuzzy_dedupe_collapses_entity_variants_and_reconciles(client) -> None:
+    payload = (
+        b'company,email\n"ACME, Inc.",a@x.com\nAcme Corp,b@x.com\n,c@x.com\n'
+    )
+    via_form = upload_csv(
+        client, payload, dedupe_by="company", fuzzy_dedupe="true"
+    )
+    via_query = client.post(
+        "/clean/csv?dedupe_by=company&fuzzy_dedupe=true",
+        files={"file": ("data.csv", payload, "text/csv")},
+    )
+    assert via_form.status_code == via_query.status_code == 200
+    form_body, query_body = via_form.json(), via_query.json()
+    for payload_body in (form_body, query_body):
+        payload_body["summary"].pop("processing_time_ms")
+    assert form_body == query_body
+
+    body = via_form.json()
+    assert body["data"] == [
+        {"company": "ACME, Inc.", "email": "a@x.com"},
+        {"company": None, "email": "c@x.com"},
+    ]
+    summary = body["summary"]
+    assert summary["rows_in"] == 3
+    assert summary["rows_out"] == 2
+    assert summary["rows_dropped"] == 1
+    assert summary["fixes_applied"]["duplicates_removed"] == 1
+    assert summary["rows_in"] == (
+        summary["rows_out"] + summary["rows_dropped"] + len(body["quarantined"])
+    )
+
+
+def test_clean_fuzzy_dedupe_disabled_keeps_entity_variants(client) -> None:
+    payload = b'company\n"ACME, Inc."\nAcme Corp\n\n'
+    sensitive = upload_csv(client, payload, dedupe_by="company")
+    fuzzy = upload_csv(
+        client, payload, dedupe_by="company", fuzzy_dedupe="true"
+    )
+    assert sensitive.status_code == fuzzy.status_code == 200
+    assert len(sensitive.json()["data"]) == 2  # trailing blank row is skipped
+    assert len(fuzzy.json()["data"]) == 1
+
+
+def test_clean_preset_maps_company_column(client) -> None:
+    payload = (
+        b"Email,Company Name\n"
+        b"A@X.COM,Acme Inc.\n"
+        b"a@x.com,Acme LLC\n"
+    )
+    response = upload_csv(client, payload, preset="hubspot")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"] == [{"Email": "a@x.com", "Company Name": "Acme"}]
+    assert body["summary"]["fixes_applied"]["companies_normalized"] == 2
+
+
+def test_clean_invalid_fuzzy_dedupe_returns_422(client) -> None:
+    response = upload_csv(client, b"a\n1\n", fuzzy_dedupe="maybe")
+    assert response.status_code == 422

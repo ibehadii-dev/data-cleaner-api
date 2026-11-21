@@ -18,6 +18,8 @@ class CleanOptions(StrictModel):
     date_dayfirst: bool = True
     email_columns: list[str] = []
     phone_columns: list[str] = Field(default_factory=list)
+    company_columns: list[str] = Field(default_factory=list)
+    fuzzy_dedupe: bool = False
     default_country_code: str = Field(default="US", min_length=2, max_length=2)
     preset: Literal["hubspot", "salesforce"] | None = None
     output_format: Literal["json", "csv", "zip"] = "json"
@@ -54,7 +56,9 @@ class CleanOptions(StrictModel):
             return value.strip()
         return value
 
-    @field_validator("date_columns", "email_columns", "phone_columns", mode="before")
+    @field_validator(
+        "date_columns", "email_columns", "phone_columns", "company_columns", mode="before"
+    )
     @classmethod
     def coerce_list(cls, value: Any) -> list[str]:
         return normalize_list_field(value) or []

@@ -13,6 +13,7 @@ from app.services.csv_cleaner import (
     clean_csv_bytes,
     decode_csv_bytes,
     dedupe,
+    normalize_companies,
     normalize_dates,
     normalize_emails,
     normalize_phones,
@@ -760,3 +761,133 @@ def test_render_bundle_quarantined_csv_escapes_formulas() -> None:
     parsed = list(csv.reader(io.StringIO(text)))
     assert parsed[0] == ["row_index", "errors", "email", "phone"]
     assert parsed[1] == ["3", "bad phone", "'=1+1", "badphone"]
+
+
+# --------------------------------------------------------------------------- #
+# Company normalisation / fuzzy deduplication
+# --------------------------------------------------------------------------- #
+def test_normalize_companies_strips_suffixes_counts_changes_and_reports_unknowns() -> None:
+    frame = pl.DataFrame(
+        {
+            "company": ["Acme Inc.", None, "", "Acme", "  Acme   Corp.  "],
+            "note": ["a", "b", "c", "d", "e"],
+        }
+    )
+    result, changed, ignored = normalize_companies(frame, ["company", "missing"])
+    assert result["company"].to_list() == ["Acme", None, None, "Acme", "Acme"]
+    assert changed == 2  # blank -> null is not a "fix"; nulls stay null
+    assert ignored == ["missing"]
+
+
+def test_clean_csv_bytes_company_columns_normalize_and_report_unknowns() -> None:
+    outcome = clean_csv_bytes(
+        b"company,name\nAcme Inc.,A\nBeta LLC,B\n",
+        CleanOptions(company_columns=["company", "ghost"]),
+    )
+    assert outcome.frame.to_dicts() == [
+        {"company": "Acme", "name": "A"},
+        {"company": "Beta", "name": "B"},
+    ]
+    assert outcome.summary.fixes_applied["companies_normalized"] == 2
+    assert outcome.summary.warnings.unknown_columns == ["ghost"]
+    assert outcome.summary.rows_in == outcome.summary.rows_out == 2
+
+
+def test_dedupe_fuzzy_collapses_entity_variants_and_preserves_blank_keys() -> None:
+    frame = pl.DataFrame(
+        {
+            "company": ["ACME, Inc.", "Acme Corp", None, "  ", "Beta LLC", "Beta Ltd."],
+            "v": [1, 2, 3, 4, 5, 6],
+        }
+    )
+    result, removed, missing, ignored = dedupe(frame, "company", fuzzy=True)
+    assert result["v"].to_list() == [1, 3, 4, 5]
+    assert (removed, missing) == (2, 2)
+    assert ignored == []
+
+
+def test_clean_csv_bytes_fuzzy_dedupe_collapses_variants_and_reconciles() -> None:
+    payload = (
+        b"company,email\n"
+        b'"ACME, Inc.",a@x.com\n'
+        b"Acme Corp,b@x.com\n"
+        b",c@x.com\n"
+        b"Beta LLC,d@x.com\n"
+        b"Beta Ltd.,e@x.com\n"
+    )
+    outcome = clean_csv_bytes(
+        payload, CleanOptions(dedupe_by="company", fuzzy_dedupe=True)
+    )
+    assert outcome.frame.to_dicts() == [
+        {"company": "ACME, Inc.", "email": "a@x.com"},
+        {"company": None, "email": "c@x.com"},
+        {"company": "Beta LLC", "email": "d@x.com"},
+    ]
+    summary = outcome.summary
+    assert summary.rows_in == 5
+    assert summary.rows_out == 3
+    assert summary.rows_dropped == 2
+    assert summary.fixes_applied["duplicates_removed"] == 2
+    assert summary.rows_in == (
+        summary.rows_out + summary.rows_dropped + len(outcome.quarantined)
+    )
+
+
+def test_clean_csv_bytes_fuzzy_dedupe_reconciles_with_quarantines() -> None:
+    payload = (
+        b"company,phone,v\n"
+        b'"ACME, Inc.",(415) 555-2671,a\n'
+        b"Acme Corp,badphone,b\n"
+        b"Acme LLC,202-555-2671,c\n"
+        b"bad,row,extra,fields\n"
+    )
+    outcome = clean_csv_bytes(
+        payload,
+        CleanOptions(
+            dedupe_by="company", fuzzy_dedupe=True, phone_columns=["phone"]
+        ),
+    )
+    assert outcome.frame.to_dicts() == [
+        {"company": "ACME, Inc.", "phone": "+14155552671", "v": "a"}
+    ]
+    assert [row.row_index for row in outcome.quarantined] == [1, 3]
+    summary = outcome.summary
+    assert summary.rows_in == 4
+    assert summary.rows_out == 1
+    assert summary.rows_dropped == 1
+    assert summary.rows_in == (
+        summary.rows_out + summary.rows_dropped + len(outcome.quarantined)
+    )
+
+
+def test_apply_preset_maps_company_columns() -> None:
+    hubspot = apply_preset(CleanOptions(preset="hubspot"), ["Email", "Company Name"])
+    assert hubspot.company_columns == ["Company Name"]
+
+    salesforce = apply_preset(
+        CleanOptions(preset="salesforce"),
+        ["Email", "Company", "Account Name"],
+    )
+    assert salesforce.company_columns == ["Company", "Account Name"]
+
+
+def test_apply_preset_does_not_override_explicit_company_columns() -> None:
+    resolved = apply_preset(
+        CleanOptions(preset="hubspot", company_columns=["My Company"]),
+        ["Email", "Company Name"],
+    )
+    assert resolved.company_columns == ["My Company"]
+
+
+def test_clean_csv_bytes_hubspot_preset_normalizes_company_column() -> None:
+    payload = (
+        b"Email,Company Name\n"
+        b"A@X.COM,Acme Inc.\n"
+        b"a@x.com,Acme LLC\n"
+    )
+    outcome = clean_csv_bytes(payload, CleanOptions(preset="hubspot"))
+    assert outcome.frame.to_dicts() == [
+        {"Email": "a@x.com", "Company Name": "Acme"}
+    ]
+    assert outcome.summary.fixes_applied["companies_normalized"] == 2
+    assert outcome.summary.fixes_applied["duplicates_removed"] == 1

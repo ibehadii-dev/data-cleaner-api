@@ -118,6 +118,11 @@
                      class="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500">
             </div>
             <div>
+              <label for="companyColumns" class="block text-xs font-medium text-slate-600">company_columns <span class="text-slate-400">(comma-separated)</span></label>
+              <input id="companyColumns" type="text" placeholder="Company Name"
+                     class="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500">
+            </div>
+            <div>
               <label for="countryCode" class="block text-xs font-medium text-slate-600">default_country_code</label>
               <input id="countryCode" type="text" value="US" maxlength="2"
                      class="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500">
@@ -128,6 +133,14 @@
                        class="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500">
                 <span><span class="font-mono font-medium">dedupe_ignore_case</span><br>
                   <span class="text-slate-400">Treat <span class="font-mono">Ada@X.com</span> and <span class="font-mono">ada@x.com</span> as duplicates</span></span>
+              </label>
+            </div>
+            <div class="flex items-end pb-2">
+              <label for="fuzzyDedupe" class="flex cursor-pointer items-start gap-2 text-xs text-slate-700">
+                <input id="fuzzyDedupe" type="checkbox"
+                       class="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500">
+                <span><span class="font-mono font-medium">fuzzy_dedupe</span><br>
+                  <span class="text-slate-400">Treat <span class="font-mono">Acme Corp.</span> and <span class="font-mono">ACME, Inc.</span> as one company</span></span>
               </label>
             </div>
           </div>
@@ -370,6 +383,8 @@
         appendList(form, 'date_columns', $('dateColumns').value);
         appendList(form, 'email_columns', $('emailColumns').value);
         appendList(form, 'phone_columns', $('phoneColumns').value);
+        appendList(form, 'company_columns', $('companyColumns').value);
+        form.append('fuzzy_dedupe', $('fuzzyDedupe').checked ? 'true' : 'false');
         form.append('default_country_code', $('countryCode').value.trim() || 'US');
         if ($('preset').value) form.append('preset', $('preset').value);
         return form;
