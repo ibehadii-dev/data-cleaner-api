@@ -1,9 +1,11 @@
 """FastAPI application: lifespan, router registration and error handling."""
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from .routers import clean, validate
 from .services.csv_cleaner import MAX_FILE_BYTES
@@ -15,6 +17,8 @@ from .utils.errors import CsvReadError
 # guards in the routers remain necessary.
 MAX_VALIDATE_BODY_BYTES = 2 * 1024 * 1024
 MAX_UPLOAD_REQUEST_BYTES = MAX_FILE_BYTES + 1024 * 1024  # multipart overhead
+
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
 @asynccontextmanager
@@ -34,6 +38,12 @@ app = FastAPI(
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/", include_in_schema=False)
+async def index() -> FileResponse:
+    """Serve the single-file frontend (no build step required)."""
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 app.include_router(clean.router)
@@ -70,3 +80,8 @@ async def enforce_body_size_limit(request: Request, call_next):
 @app.exception_handler(CsvReadError)
 async def csv_read_error_handler(request: Request, exc: CsvReadError) -> JSONResponse:
     return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+# Mounted last so it can never shadow an API route. The directory must exist at
+# import time; it ships with the repository alongside this module.
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
