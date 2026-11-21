@@ -2,7 +2,7 @@ data-cleaner-api fix checklist
 
 P0: bugs, crashes, data loss
 
-\[ ] 1. Dedupe merges rows with missing keys
+\[x] 1. Dedupe merges rows with missing keys
 
 Severity: P0
 
@@ -12,7 +12,7 @@ Issue: Null and blank/whitespace keys collapse into one row, and the loss is rep
 
 Fix / Workaround: Blank the key to null, then filter with key.is\_null() | key.is\_first\_distinct(). Update the test to expect all missing-key rows to be kept.
 
-\[ ] 2. Dedupe lowercases every key
+\[x] 2. Dedupe lowercases every key
 
 Severity: P0
 
@@ -22,7 +22,7 @@ Issue: Case-sensitive IDs (e.g. Salesforce 15-char) that differ only by case are
 
 Fix / Workaround: Add dedupe\_ignore\_case: bool = False and only lowercase when it’s true. Note the changed default in your changelog.
 
-\[ ] 3. rows\_in is derived from the frame, so reconciliation can’t fail; blank lines create phantom rows
+\[x] 3. rows\_in is derived from the frame, so reconciliation can’t fail; blank lines create phantom rows
 
 Severity: P0
 
@@ -32,7 +32,7 @@ Issue: rows\_in = frame.height + len(quarantined) balances even if Polars drops 
 
 Fix / Workaround: Count rows\_in from csv.reader records. Skip blank lines and report them as blank\_rows\_skipped. Raise CsvReadError if frame.height != records - quarantined - blank.
 
-\[ ] 4. CPU-bound work blocks the event loop
+\[x] 4. CPU-bound work blocks the event loop
 
 Severity: P0
 
@@ -42,7 +42,7 @@ Issue: Both async def endpoints run sync work inline. /health took 2.85 s (vs 0.
 
 Fix / Workaround: Wrap the call: await run\_in\_threadpool(clean\_csv\_bytes, data, options). Change validate\_json to a plain def.
 
-\[ ] 5. Semicolon/tab-delimited CSVs parse as one column with HTTP 200
+\[x] 5. Semicolon/tab-delimited CSVs parse as one column with HTTP 200
 
 Severity: P0
 
@@ -52,7 +52,7 @@ Issue: id;email;joined becomes a single column and the only signal is unknown\_c
 
 Fix / Workaround: Add a delimiter option, or sniff over ",;\\t|". Return 400 when a one-column header contains ; or a tab.
 
-\[ ] 6. Memory is roughly 20x the file size
+\[x] 6. Memory is roughly 20x the file size
 
 Severity: P0
 
@@ -62,7 +62,7 @@ Issue: A 24 MB file peaked at about 558 MB RSS. Chunk list, joined bytes, decode
 
 Fix / Workaround: Return Response(frame.write\_json(), media\_type="application/json") instead of to\_dicts() plus the response model. Run del on intermediates, or validate row shape with Polars (pl.col(...).str.count\_matches) instead of materialising every row in Python.
 
-\[ ] 7. Dates are parsed per cell, so one column can mix day-first and month-first
+\[x] 7. Dates are parsed per cell, so one column can mix day-first and month-first
 
 Severity: P0
 
@@ -72,7 +72,7 @@ Issue: 13/05/2024 is read as d/m while 05/13/2024 is read as m/d. Ambiguous valu
 
 Fix / Workaround: Pick one format per column (the one that parses the most non-null cells). Add a date\_dayfirst option and an ambiguous\_dates counter.
 
-\[ ] 8. OverflowError returns a 500 on huge JSON integers
+\[x] 8. OverflowError returns a 500 on huge JSON integers
 
 Severity: P0
 
@@ -82,7 +82,7 @@ Issue: {"n": 10\*\*400} with type: integer raises an unhandled OverflowError.
 
 Fix / Workaround: Handle int values without float(), and catch (ValueError, OverflowError) around the remaining conversions.
 
-\[ ] 9. Quadratic email regex and no input caps on /validate/json
+\[x] 9. Quadratic email regex and no input caps on /validate/json
 
 Severity: P0
 
@@ -94,7 +94,7 @@ Fix / Workaround: Return False when len(s) > 254 before the regex. Add Field(max
 
 P1: edge cases, quality, workarounds
 
-\[ ] 10. Latin-1 fallback mis-decodes Windows (cp1252) files
+\[x] 10. Latin-1 fallback mis-decodes Windows (cp1252) files
 
 Severity: P1
 
@@ -104,7 +104,7 @@ Issue: Latin-1 never fails, so smart quotes come out as \\x93hello\\x94 with no 
 
 Fix / Workaround: Try cp1252 before latin-1.
 
-\[ ] 11. Header whitespace silently defeats options
+\[x] 11. Header whitespace silently defeats options
 
 Severity: P1
 
@@ -114,7 +114,7 @@ Issue: A header of " email" doesn’t match email, so the option is ignored with
 
 Fix / Workaround: Strip header names right after reading with frame.rename({c: c.strip() for c in frame.columns}).
 
-\[ ] 12. Duplicate headers are silently renamed
+\[x] 12. Duplicate headers are silently renamed
 
 Severity: P1
 
@@ -124,7 +124,7 @@ Issue: a,a,b becomes a, a\_duplicated\_0, b with no warning.
 
 Fix / Workaround: Detect duplicate headers in \_filter\_malformed\_rows and return 400, or report them in the summary.
 
-\[ ] 13. Repeated query params keep only the last value
+\[x] 13. Repeated query params keep only the last value
 
 Severity: P1
 
@@ -134,7 +134,7 @@ Issue: ?date\_columns=dob\&date\_columns=signup normalizes only signup, and dob 
 
 Fix / Workaround: Use query.getlist(name) for list options, or remove query-string input entirely and accept form fields only.
 
-\[ ] 14. FieldRule.nullable is never read
+\[x] 14. FieldRule.nullable is never read
 
 Severity: P1
 
@@ -144,7 +144,7 @@ Issue: required=True, nullable=True still errors on null. The test passes only b
 
 Fix / Workaround: In the empty-value branch, skip the required error when rule.nullable and the value is None. Or delete the field. Make the test use required=True.
 
-\[ ] 15. Integer/number check accepts "1\_000" and "1e3"
+\[x] 15. Integer/number check accepts "1\_000" and "1e3"
 
 Severity: P1
 
@@ -154,7 +154,7 @@ Issue: Python float() accepts underscores and exponent notation, so these string
 
 Fix / Workaround: Pre-check strings with a regex like ^\[+-]?\\d+(\\.\\d+)?$. Document that the validator doesn’t coerce values.
 
-\[ ] 16. Validator and cleaner disagree on dates
+\[x] 16. Validator and cleaner disagree on dates
 
 Severity: P1
 
@@ -164,7 +164,7 @@ Issue: 2024-01-15T10:30:00+05:30 and fractional-second timestamps are valid in /
 
 Fix / Workaround: Share one format list, or drop the fromisoformat fallback. Remove the unreachable date.fromisoformat block while you’re there.
 
-\[ ] 17. CSV mode hides which rows were quarantined
+\[x] 17. CSV mode hides which rows were quarantined
 
 Severity: P1
 
@@ -174,7 +174,7 @@ Issue: The caller gets only an X-Quarantined-Rows count, so bad rows can’t be 
 
 Fix / Workaround: Add a GET/second-part response or a zip with quarantined.csv, or tell CSV users to request JSON mode to see quarantined rows.
 
-\[ ] 18. Inconsistent summary contract across endpoints
+\[x] 18. Inconsistent summary contract across endpoints
 
 Severity: P1
 
@@ -184,7 +184,7 @@ Issue: rows\_dropped excludes quarantined rows in /clean but includes them in /v
 
 Fix / Workaround: Define one invariant for both endpoints. Move malformed\_rows and unknown\_columns\_ignored into a separate warnings field with column names, and always emit the same keys.
 
-\[ ] 19. rows\_in from a Content-Length-less cap check is misleading; the 413 guard doesn’t prevent buffering
+\[x] 19. rows\_in from a Content-Length-less cap check is misleading; the 413 guard doesn’t prevent buffering
 
 Severity: P1
 
@@ -194,7 +194,7 @@ Issue: Starlette has already parsed and spooled the whole multipart body before 
 
 Fix / Workaround: Check file.size first, and enforce the real limit at the proxy or in middleware on Content-Length. Fix the docstring.
 
-\[ ] 20. CSV formula injection in output
+\[x] 20. CSV formula injection in output
 
 Severity: P1
 
@@ -204,7 +204,7 @@ Issue: Cells starting with =, +, - or @ run as formulas when the output is opene
 
 Fix / Workaround: Prefix such cells with ' in CSV output only, ideally behind an option so JSON mode and data fidelity are unchanged.
 
-\[ ] 21. Test environment drift and an unnecessary workaround
+\[x] 21. Test environment drift and an unnecessary workaround
 
 Severity: P1
 
@@ -213,4 +213,8 @@ Where: requirements.txt (httpx==0.28.1); HANDOFF.md (“Known bugs” #1 cites h
 Issue: The Starlette TestClient warns that httpx is deprecated in favour of httpx2, while the handoff claims httpx2 is installed. The raw-multipart test is unnecessary: data={"date\_columns": \[...]} returns 200 with the pinned stack.
 
 Fix / Workaround: Pick one client (pin httpx2, or stay on httpx and ignore the warning), then replace the raw-multipart test with the dict-of-lists form. Correct HANDOFF.md
+
+---
+
+All 21 items verified fixed (2026-11-21). Verification: `python -m pytest -v` → **124 passed** (no failures or warnings); `python scripts/smoke.py` → **smoke OK**.
 
