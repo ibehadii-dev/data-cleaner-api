@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import csv
 import io
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import polars as pl
 
 from ..schemas.clean import CleanOptions
 from ..schemas.common import QuarantinedRecord, SummaryReport
-from ..utils.dates import DATE_FORMATS
+from ..utils.dates import AMBIGUOUS_DATE_FORMATS, UNAMBIGUOUS_DATE_FORMATS
 from ..utils.errors import CsvReadError
 
 MAX_FILE_BYTES = 25 * 1024 * 1024
@@ -317,38 +318,87 @@ def normalize_emails(
     return frame, changed_count, ignored
 
 
-def _date_exprs(expression: pl.Expr) -> tuple[pl.Expr, pl.Expr]:
+def _date_exprs(
+    expression: pl.Expr, formats: Sequence[str]
+) -> tuple[pl.Expr, pl.Expr]:
     """Build the trimmed-string and parsed-Date expressions for a column."""
     trimmed = expression.cast(pl.String).str.strip_chars()
     trimmed = pl.when(trimmed == "").then(None).otherwise(trimmed)
 
     # strict=False makes an unparseable value null instead of raising.
     parsed = pl.lit(None, dtype=pl.Date)
-    for fmt in DATE_FORMATS:
+    for fmt in formats:
         parsed = pl.coalesce(
             parsed, trimmed.str.strptime(pl.Date, format=fmt, strict=False)
         )
     return trimmed, parsed
 
 
+def _select_date_formats(values: pl.Series, dayfirst: bool) -> tuple[list[str], int]:
+    """Choose one format per ambiguous pair using evidence from the whole column.
+
+    The format that parses the most non-null cells wins; ``dayfirst`` breaks
+    ties. Cells that both formats in a pair accept are counted as ambiguous.
+    """
+    selected: list[str] = []
+    ambiguous = 0
+
+    for day_fmt, month_fmt in AMBIGUOUS_DATE_FORMATS:
+        by_day = values.str.strptime(
+            pl.Date, format=day_fmt, strict=False
+        ).is_not_null()
+        by_month = values.str.strptime(
+            pl.Date, format=month_fmt, strict=False
+        ).is_not_null()
+        day_count = int(by_day.sum())
+        month_count = int(by_month.sum())
+        ambiguous += int((by_day & by_month).sum())
+
+        if day_count > month_count or (day_count == month_count and dayfirst):
+            selected.append(day_fmt)
+        else:
+            selected.append(month_fmt)
+
+    return selected, ambiguous
+
+
 def normalize_dates(
-    frame: pl.DataFrame, columns: list[str]
-) -> tuple[pl.DataFrame, int, int, list[str]]:
+    frame: pl.DataFrame, columns: list[str], dayfirst: bool = True
+) -> tuple[pl.DataFrame, int, int, int, list[str]]:
     """Normalise date columns to ``YYYY-MM-DD``.
 
+    One format is selected per ambiguous numeric pair from the whole column,
+    so a column never mixes day-first and month-first readings. Structurally
+    unambiguous formats (ISO, month names, ...) remain available per cell.
     Values that cannot be parsed are preserved verbatim and counted in
     ``unparseable`` rather than being dropped or causing an exception.
     """
     ignored: list[str] = []
     normalized = 0
     unparseable = 0
+    ambiguous = 0
 
     for column in columns:
         if column not in frame.columns:
             ignored.append(column)
             continue
 
-        trimmed, parsed = _date_exprs(pl.col(column))
+        # Prepare trimmed values once so format selection sees the same text
+        # that parsing will use.
+        frame = frame.with_columns(
+            pl.col(column).cast(pl.String).str.strip_chars().alias(_TRIM_COL)
+        ).with_columns(
+            pl.when(pl.col(_TRIM_COL) == "")
+            .then(None)
+            .otherwise(pl.col(_TRIM_COL))
+            .alias(_TRIM_COL)
+        )
+        selected, column_ambiguous = _select_date_formats(frame[_TRIM_COL], dayfirst)
+        ambiguous += column_ambiguous
+
+        trimmed, parsed = _date_exprs(
+            pl.col(column), (*UNAMBIGUOUS_DATE_FORMATS, *selected)
+        )
         frame = frame.with_columns(
             trimmed.alias(_TRIM_COL),
             parsed.alias(_PARSED_COL),
@@ -365,30 +415,36 @@ def normalize_dates(
             ).alias(column)
         ).drop(_TRIM_COL, _PARSED_COL)
 
-    return frame, normalized, unparseable, ignored
+    return frame, normalized, unparseable, ambiguous, ignored
 
 
 def dedupe(
-    frame: pl.DataFrame, column: str | None
+    frame: pl.DataFrame, column: str | None, ignore_case: bool = False
 ) -> tuple[pl.DataFrame, int, int, list[str]]:
-    """Keep the first row per case/trim-insensitive key.
+    """Keep the first row per trimmed key, preserving case unless asked not to.
 
-    Returns the reduced frame, the number of rows removed, the number of rows
-    with a missing key, and any unknown column names.
+    Null and blank/whitespace-only keys are all kept: they are reported as
+    missing rather than collapsed into one duplicate. Returns the reduced
+    frame, the number of rows removed, the number of rows with a missing key,
+    and any unknown column names.
     """
     if column is None:
         return frame, 0, 0, []
     if column not in frame.columns:
         return frame, 0, 0, [column]
 
-    key = frame[column].cast(pl.String).str.strip_chars().str.to_lowercase()
-    missing_key = int(key.is_null().sum())
+    key = pl.col(column).cast(pl.String).str.strip_chars()
+    if ignore_case:
+        key = key.str.to_lowercase()
+    key = pl.when(key == "").then(None).otherwise(key)
+
+    missing_key = int(frame.select(key.is_null().sum()).item() or 0)
     before = frame.height
 
     reduced = (
         frame.with_columns(key.alias(_KEY_COL))
         .with_row_index(_ORDER_COL)
-        .unique(subset=[_KEY_COL], keep="first", maintain_order=True)
+        .filter(pl.col(_KEY_COL).is_null() | pl.col(_KEY_COL).is_first_distinct())
         .sort(_ORDER_COL)
         .drop(_KEY_COL, _ORDER_COL)
     )
@@ -421,13 +477,13 @@ def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
     )
     ignored.extend(ignored_emails)
 
-    frame, dates_normalized, unparseable, ignored_dates = normalize_dates(
-        frame, options.date_columns
+    frame, dates_normalized, unparseable, ambiguous, ignored_dates = normalize_dates(
+        frame, options.date_columns, dayfirst=options.date_dayfirst
     )
     ignored.extend(ignored_dates)
 
     frame, duplicates_removed, missing_keys, ignored_dedupe = dedupe(
-        frame, options.dedupe_by
+        frame, options.dedupe_by, ignore_case=options.dedupe_ignore_case
     )
     ignored.extend(ignored_dedupe)
 
@@ -438,6 +494,8 @@ def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
         "duplicates_removed": duplicates_removed,
         "malformed_rows": len(quarantined),
     }
+    if ambiguous:
+        fixes["ambiguous_dates"] = ambiguous
     if missing_keys:
         fixes["rows_missing_dedupe_key"] = missing_keys
     if ignored:

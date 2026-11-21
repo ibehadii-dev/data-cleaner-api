@@ -346,3 +346,43 @@ def test_clean_json_does_not_materialise_records_with_to_dicts(client, monkeypat
         },
         "quarantined": [],
     }
+
+
+def test_clean_dedupe_ignore_case_option(client) -> None:
+    payload = b"k,v\nABC,1\nabc,2\n"
+
+    sensitive = upload_csv(client, payload, dedupe_by="k")
+    assert sensitive.status_code == 200
+    assert len(sensitive.json()["data"]) == 2
+
+    insensitive = upload_csv(
+        client, payload, dedupe_by="k", dedupe_ignore_case="true"
+    )
+    assert insensitive.status_code == 200
+    assert insensitive.json()["data"] == [{"k": "ABC", "v": "1"}]
+    assert insensitive.json()["summary"]["fixes_applied"]["duplicates_removed"] == 1
+
+
+def test_clean_date_dayfirst_option(client) -> None:
+    payload = b"d\n05/06/2024\n"
+
+    day_first = upload_csv(client, payload, date_columns="d")
+    assert day_first.status_code == 200
+    assert day_first.json()["data"] == [{"d": "2024-06-05"}]
+
+    month_first = upload_csv(
+        client, payload, date_columns="d", date_dayfirst="false"
+    )
+    assert month_first.status_code == 200
+    assert month_first.json()["data"] == [{"d": "2024-05-06"}]
+
+
+def test_clean_ambiguous_dates_are_reported(client) -> None:
+    response = upload_csv(
+        client, b"d\n03/04/2024\n", date_columns="d"
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"] == [{"d": "2024-04-03"}]
+    assert body["summary"]["fixes_applied"]["ambiguous_dates"] == 1
+    assert body["summary"]["rows_in"] == body["summary"]["rows_out"] == 1

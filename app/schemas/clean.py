@@ -13,7 +13,9 @@ _ALLOWED_DELIMITERS = (",", ";", "\t", "|")
 
 class CleanOptions(StrictModel):
     dedupe_by: str | None = None
+    dedupe_ignore_case: bool = False
     date_columns: list[str] = []
+    date_dayfirst: bool = True
     email_columns: list[str] = []
     output_format: Literal["json", "csv"] = "json"
     delimiter: str | None = None

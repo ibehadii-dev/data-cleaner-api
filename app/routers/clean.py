@@ -34,16 +34,22 @@ def _pick(
 def _resolve_options(
     request: Request,
     dedupe_by: str | None,
+    dedupe_ignore_case: str | None,
     date_columns: list[str] | None,
+    date_dayfirst: str | None,
     email_columns: list[str] | None,
     output_format: str | None,
     delimiter: str | None,
 ) -> CleanOptions:
     query = request.query_params
+    ignore_case = _pick("dedupe_ignore_case", dedupe_ignore_case, query)
+    dayfirst = _pick("date_dayfirst", date_dayfirst, query)
     try:
         return CleanOptions(
             dedupe_by=_pick("dedupe_by", dedupe_by, query),
+            dedupe_ignore_case=False if ignore_case is None else ignore_case,
             date_columns=_pick("date_columns", date_columns, query),
+            date_dayfirst=True if dayfirst is None else dayfirst,
             email_columns=_pick("email_columns", email_columns, query),
             output_format=_pick("output_format", output_format, query) or "json",
             delimiter=_pick("delimiter", delimiter, query),
@@ -88,13 +94,22 @@ async def clean_csv(
     request: Request,
     file: UploadFile = File(...),
     dedupe_by: Annotated[str | None, Form()] = None,
+    dedupe_ignore_case: Annotated[str | None, Form()] = None,
     date_columns: Annotated[list[str] | None, Form()] = None,
+    date_dayfirst: Annotated[str | None, Form()] = None,
     email_columns: Annotated[list[str] | None, Form()] = None,
     output_format: Annotated[str | None, Form()] = None,
     delimiter: Annotated[str | None, Form()] = None,
 ) -> Any:
     options = _resolve_options(
-        request, dedupe_by, date_columns, email_columns, output_format, delimiter
+        request,
+        dedupe_by,
+        dedupe_ignore_case,
+        date_columns,
+        date_dayfirst,
+        email_columns,
+        output_format,
+        delimiter,
     )
     data = await read_upload_limited(file)
     outcome = await run_in_threadpool(clean_csv_bytes, data, options)

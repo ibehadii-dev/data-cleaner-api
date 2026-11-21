@@ -207,7 +207,7 @@ def test_normalize_dates_all_supported_formats() -> None:
             ]
         }
     )
-    result, normalized, unparseable, ignored = normalize_dates(frame, ["d"])
+    result, normalized, unparseable, ambiguous, ignored = normalize_dates(frame, ["d"])
     assert result["d"].to_list() == [
         "2024-01-15",
         "2024-03-15",
@@ -221,52 +221,111 @@ def test_normalize_dates_all_supported_formats() -> None:
     ]
     assert normalized == 6
     assert unparseable == 1
+    assert ambiguous == 1  # 03/04/2024 parses both ways
     assert ignored == []
 
 
 def test_normalize_dates_unparseable_is_preserved_and_counted() -> None:
     frame = pl.DataFrame({"d": ["definitely not a date"]})
-    result, normalized, unparseable, _ = normalize_dates(frame, ["d"])
+    result, normalized, unparseable, ambiguous, _ = normalize_dates(frame, ["d"])
     assert result["d"].to_list() == ["definitely not a date"]
-    assert normalized == 0
-    assert unparseable == 1
+    assert (normalized, unparseable, ambiguous) == (0, 1, 0)
 
 
 def test_normalize_dates_nulls_and_empty_do_not_crash() -> None:
     frame = pl.DataFrame({"d": [None, "", "  "]})
-    result, normalized, unparseable, _ = normalize_dates(frame, ["d"])
+    result, normalized, unparseable, ambiguous, _ = normalize_dates(frame, ["d"])
     # Empty / whitespace-only values become null; nothing is counted as a fix.
     assert result["d"].to_list() == [None, None, None]
-    assert normalized == 0
-    assert unparseable == 0
+    assert (normalized, unparseable, ambiguous) == (0, 0, 0)
 
 
 def test_normalize_dates_missing_column_is_noop() -> None:
     frame = pl.DataFrame({"d": ["2024-01-15"]})
-    result, normalized, unparseable, ignored = normalize_dates(frame, ["nope"])
+    result, normalized, unparseable, ambiguous, ignored = normalize_dates(
+        frame, ["nope"]
+    )
     assert result.to_dicts() == frame.to_dicts()
-    assert (normalized, unparseable) == (0, 0)
+    assert (normalized, unparseable, ambiguous) == (0, 0, 0)
     assert ignored == ["nope"]
+
+
+def test_normalize_dates_uses_one_numeric_format_per_column() -> None:
+    frame = pl.DataFrame({"d": ["13/05/2024", "05/13/2024"]})
+    result, normalized, unparseable, ambiguous, _ = normalize_dates(frame, ["d"])
+    # One parse per format -> tie -> dayfirst default; the month-first-only
+    # value is left verbatim instead of being parsed with the other format.
+    assert result["d"].to_list() == ["2024-05-13", "05/13/2024"]
+    assert (normalized, unparseable, ambiguous) == (1, 1, 0)
+
+
+def test_normalize_dates_dayfirst_option_selects_month_first() -> None:
+    frame = pl.DataFrame({"d": ["05/06/2024", "06/07/2024"]})
+    day_first, *_ = normalize_dates(frame, ["d"], dayfirst=True)
+    month_first, *_ = normalize_dates(frame, ["d"], dayfirst=False)
+    assert day_first["d"].to_list() == ["2024-06-05", "2024-07-06"]
+    assert month_first["d"].to_list() == ["2024-05-06", "2024-06-07"]
+
+
+def test_normalize_dates_counts_only_genuinely_ambiguous_values() -> None:
+    frame = pl.DataFrame({"d": ["05/06/2024", "13/05/2024", "2024-01-15", None]})
+    result, normalized, unparseable, ambiguous, _ = normalize_dates(frame, ["d"])
+    # 05/06 parses both ways; 13/05 is day-first only; ISO is unambiguous.
+    assert result["d"].to_list() == ["2024-06-05", "2024-05-13", "2024-01-15", None]
+    assert (normalized, unparseable, ambiguous) == (3, 0, 1)
+
+
+def test_normalize_dates_dash_pair_also_uses_one_format_per_column() -> None:
+    frame = pl.DataFrame({"d": ["05-06-2024", "06-07-2024"]})
+    result, normalized, unparseable, ambiguous, _ = normalize_dates(
+        frame, ["d"], dayfirst=False
+    )
+    assert result["d"].to_list() == ["2024-05-06", "2024-06-07"]
+    assert (normalized, unparseable, ambiguous) == (2, 0, 2)
 
 
 # --------------------------------------------------------------------------- #
 # Deduplication
 # --------------------------------------------------------------------------- #
-def test_dedupe_keeps_first_trim_lowercase_key() -> None:
+def test_dedupe_keeps_first_trimmed_key_case_sensitively() -> None:
     frame = pl.DataFrame({"k": [" A ", "a", "B"], "v": [1, 2, 3]})
     result, removed, missing, ignored = dedupe(frame, "k")
+    # Case is preserved by default, so " A " and "a" are distinct keys.
+    assert result.to_dicts() == [
+        {"k": " A ", "v": 1},
+        {"k": "a", "v": 2},
+        {"k": "B", "v": 3},
+    ]
+    assert (removed, missing) == (0, 0)
+    assert ignored == []
+
+
+def test_dedupe_ignore_case_merges_case_variants() -> None:
+    frame = pl.DataFrame({"k": [" A ", "a", "B"], "v": [1, 2, 3]})
+    result, removed, missing, ignored = dedupe(frame, "k", ignore_case=True)
     assert result.to_dicts() == [{"k": " A ", "v": 1}, {"k": "B", "v": 3}]
-    assert removed == 1
-    assert missing == 0
+    assert (removed, missing) == (1, 0)
     assert ignored == []
 
 
 def test_dedupe_null_keys_are_handled_and_counted() -> None:
     frame = pl.DataFrame({"k": [None, None, " a ", "A"], "v": [1, 2, 3, 4]})
     result, removed, missing, _ = dedupe(frame, "k")
-    assert result.to_dicts() == [{"k": None, "v": 1}, {"k": " a ", "v": 3}]
-    assert removed == 2
-    assert missing == 2
+    # Both null-key rows survive; only genuinely duplicated non-null keys go.
+    assert result.to_dicts() == [
+        {"k": None, "v": 1},
+        {"k": None, "v": 2},
+        {"k": " a ", "v": 3},
+        {"k": "A", "v": 4},
+    ]
+    assert (removed, missing) == (0, 2)
+
+
+def test_dedupe_blank_keys_are_preserved_as_missing() -> None:
+    frame = pl.DataFrame({"k": ["", "  ", None, "x", "x"], "v": [1, 2, 3, 4, 5]})
+    result, removed, missing, _ = dedupe(frame, "k")
+    assert result["v"].to_list() == [1, 2, 3, 4]
+    assert (removed, missing) == (1, 3)
 
 
 def test_dedupe_missing_column_is_noop() -> None:
@@ -414,3 +473,56 @@ def test_row_count_mismatch_raises_csv_read_error(monkeypatch) -> None:
     monkeypatch.setattr(csv_cleaner.pl, "read_csv", duplicated_read_csv)
     with pytest.raises(CsvReadError, match="row count mismatch"):
         clean_csv_bytes(b"a,b\n1,2\n", CleanOptions())
+
+
+def test_clean_csv_bytes_dedupe_is_case_sensitive_by_default() -> None:
+    outcome = clean_csv_bytes(
+        b"k,v\nABC,1\nabc,2\n", CleanOptions(dedupe_by="k")
+    )
+    assert outcome.frame.height == 2
+    assert outcome.summary.rows_dropped == 0
+    assert "duplicates_removed" in outcome.summary.fixes_applied
+
+
+def test_clean_csv_bytes_dedupe_ignore_case_option() -> None:
+    outcome = clean_csv_bytes(
+        b"k,v\nABC,1\nabc,2\n",
+        CleanOptions(dedupe_by="k", dedupe_ignore_case=True),
+    )
+    assert outcome.frame.to_dicts() == [{"k": "ABC", "v": "1"}]
+    assert outcome.summary.rows_dropped == 1
+    assert outcome.summary.fixes_applied["duplicates_removed"] == 1
+
+
+def test_clean_csv_bytes_missing_dedupe_keys_are_kept_and_counted() -> None:
+    outcome = clean_csv_bytes(
+        b"k,v\n,1\n   ,2\nX,3\nx,4\n", CleanOptions(dedupe_by="k")
+    )
+    assert [row["v"] for row in outcome.frame.to_dicts()] == ["1", "2", "3", "4"]
+    assert outcome.summary.rows_dropped == 0
+    assert outcome.summary.fixes_applied["rows_missing_dedupe_key"] == 2
+
+
+def test_clean_csv_bytes_reports_ambiguous_dates_and_reconciles() -> None:
+    outcome = clean_csv_bytes(
+        b"d\n03/04/2024\n2024-01-15\n", CleanOptions(date_columns=["d"])
+    )
+    assert outcome.frame.to_dicts() == [{"d": "2024-04-03"}, {"d": "2024-01-15"}]
+    assert outcome.summary.fixes_applied["ambiguous_dates"] == 1
+    assert outcome.summary.rows_in == outcome.summary.rows_out == 2
+    assert (
+        outcome.summary.rows_in
+        == outcome.summary.rows_out
+        + outcome.summary.rows_dropped
+        + len(outcome.quarantined)
+    )
+
+
+def test_clean_csv_bytes_date_dayfirst_option() -> None:
+    payload = b"d\n05/06/2024\n"
+    day = clean_csv_bytes(payload, CleanOptions(date_columns=["d"]))
+    month = clean_csv_bytes(
+        payload, CleanOptions(date_columns=["d"], date_dayfirst=False)
+    )
+    assert day.frame.to_dicts() == [{"d": "2024-06-05"}]
+    assert month.frame.to_dicts() == [{"d": "2024-05-06"}]

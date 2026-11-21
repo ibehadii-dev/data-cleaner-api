@@ -23,6 +23,21 @@ DATE_FORMATS: tuple[str, ...] = (
     "%Y%m%d",
 )
 
+# Numeric formats where both readings can be valid (e.g. 03/04/2024). The CSV
+# cleaner picks ONE format from each pair for an entire column, so a column
+# never mixes day-first and month-first interpretations.
+AMBIGUOUS_DATE_FORMATS: tuple[tuple[str, str], ...] = (
+    ("%d/%m/%Y", "%m/%d/%Y"),
+    ("%d-%m-%Y", "%m-%d-%Y"),
+)
+
+_AMBIGUOUS_SET = {fmt for pair in AMBIGUOUS_DATE_FORMATS for fmt in pair}
+
+# All other formats are structurally unambiguous and stay available per cell.
+UNAMBIGUOUS_DATE_FORMATS: tuple[str, ...] = tuple(
+    fmt for fmt in DATE_FORMATS if fmt not in _AMBIGUOUS_SET
+)
+
 
 def parse_date_string(value: Any) -> date | None:
     """Best-effort conversion of a JSON value to a ``date``.
