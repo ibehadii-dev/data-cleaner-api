@@ -1,8 +1,10 @@
 """Schemas for the JSON validation endpoint."""
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from .common import QuarantinedRecord, StrictModel
+from pydantic import Field
+
+from .common import QuarantinedRecord, StrictModel, WarningSummary
 
 
 class FieldRule(StrictModel):
@@ -11,8 +13,14 @@ class FieldRule(StrictModel):
     nullable: bool = False
 
 
+MAX_RECORDS_PER_BATCH = 1000
+
+
 class ValidateRequest(StrictModel):
-    records: list[dict[str, Any]]
+    # Cap the number of records so one request cannot monopolise the worker.
+    records: Annotated[
+        list[dict[str, Any]], Field(max_length=MAX_RECORDS_PER_BATCH)
+    ]
     field_rules: dict[str, FieldRule]
 
 
@@ -24,6 +32,7 @@ class ValidateSummary(StrictModel):
     valid_count: int
     quarantined_count: int
     errors_by_field: dict[str, int] = {}
+    warnings: WarningSummary = Field(default_factory=WarningSummary)
 
 
 class ValidateResponse(StrictModel):

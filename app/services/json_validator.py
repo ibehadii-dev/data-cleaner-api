@@ -6,6 +6,7 @@ import math
 import re
 from typing import Any
 
+from ..schemas.common import WarningSummary
 from ..schemas.validate import (
     FieldRule,
     QuarantinedRecord,
@@ -15,11 +16,26 @@ from ..schemas.validate import (
 from ..utils.dates import parse_date_string
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+NUMERIC_RE = re.compile(r"^[+-]?\d+(\.\d+)?$")
+MAX_EMAIL_LENGTH = 254
 BOOLEANS = {"true", "false", "yes", "no", "1", "0"}
 
 
+def _valid_email(value: Any) -> bool:
+    """Reject over-long strings before running the regex (item #9)."""
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    # The regex is quadratic on long runs of characters; cap first.
+    return len(text) <= MAX_EMAIL_LENGTH and bool(EMAIL_RE.match(text))
+
+
 def _check_type(value: Any, rule: FieldRule) -> str | None:
-    """Return a human-readable problem description, or ``None`` when valid."""
+    """Return a human-readable problem description, or ``None`` when valid.
+
+    Validation never coerces values: a string that looks numeric is checked
+    against a strict decimal pattern but is returned to the caller unchanged.
+    """
     kind = rule.type
 
     if kind == "string":
@@ -27,7 +43,7 @@ def _check_type(value: Any, rule: FieldRule) -> str | None:
             return "must be a string"
 
     elif kind == "email":
-        if not isinstance(value, str) or not EMAIL_RE.match(value.strip()):
+        if not _valid_email(value):
             return "must be a valid email address"
 
     elif kind == "date":
@@ -46,7 +62,12 @@ def _check_type(value: Any, rule: FieldRule) -> str | None:
             if isinstance(value, float):
                 number = value
             elif isinstance(value, str):
-                number = float(value.strip())
+                text = value.strip()
+                # float() accepts "1_000", "1e3" and whitespace-only strings;
+                # require a plain decimal literal instead (item #15).
+                if not NUMERIC_RE.fullmatch(text):
+                    return "must be a number"
+                number = float(text)
             else:
                 return "must be a number"
 
@@ -96,7 +117,9 @@ def validate_records(
             )
 
             if is_empty:
-                if rule.required:
+                # A nullable field accepts null (including an absent field)
+                # even when it is required; blank strings still fail.
+                if rule.required and not (rule.nullable and value is None):
                     errors.append(f"'{field}' is required")
                     errors_by_field[field] = errors_by_field.get(field, 0) + 1
                 # Optional / nullable empty values are simply skipped.
@@ -115,14 +138,17 @@ def validate_records(
             valid.append(record)
 
     total = len(records)
+    # rows_dropped excludes quarantined rows on both endpoints, so the shared
+    # invariant rows_in == rows_out + rows_dropped + quarantined_count holds.
     summary = ValidateSummary(
         rows_in=total,
         rows_out=len(valid),
-        rows_dropped=len(quarantined),
+        rows_dropped=0,
         fixes_applied={},
         valid_count=len(valid),
         quarantined_count=len(quarantined),
         errors_by_field=errors_by_field,
+        warnings=WarningSummary(),
     )
     return ValidateResponse(
         valid=valid, quarantined=quarantined, summary=summary

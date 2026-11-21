@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-import httpx
+import httpx2 as httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -101,7 +101,8 @@ def main() -> int:
             assert summary["rows_in"] == 3
             assert summary["rows_out"] == 2
             assert summary["rows_dropped"] == 0
-            assert summary["fixes_applied"]["malformed_rows"] == 1
+            assert summary["warnings"]["malformed_rows"] == 1
+            assert summary["warnings"]["unknown_columns"] == []
             assert summary["fixes_applied"]["unparseable_dates"] == 1
             assert summary["rows_in"] == (
                 summary["rows_out"] + summary["rows_dropped"] + len(body["quarantined"])
@@ -124,6 +125,11 @@ def main() -> int:
             result = validate.json()
             assert result["summary"]["valid_count"] == 1
             assert result["summary"]["quarantined_count"] == 1
+            assert result["summary"]["rows_dropped"] == 0
+            assert result["summary"]["warnings"] == {
+                "malformed_rows": 0,
+                "unknown_columns": [],
+            }
             assert result["summary"]["fixes_applied"] == {}
 
         print(f"smoke OK: /health, /clean/csv, /validate/json on {base_url}")

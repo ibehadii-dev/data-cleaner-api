@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import zipfile
 from typing import Annotated, Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -13,7 +15,11 @@ from pydantic import ValidationError
 from ..schemas.clean import CleanJsonResponse, CleanOptions
 from ..schemas.common import ErrorResponse
 from ..services import csv_cleaner
-from ..services.csv_cleaner import clean_csv_bytes, render_csv
+from ..services.csv_cleaner import (
+    clean_csv_bytes,
+    render_csv,
+    render_quarantined_csv,
+)
 
 router = APIRouter(prefix="/clean", tags=["clean"])
 
@@ -31,6 +37,18 @@ def _pick(
     return query.get(name)
 
 
+def _pick_list(
+    name: str,
+    form_value: list[str] | None,
+    query: Any,
+) -> list[str] | None:
+    """Like :func:`_pick`, but keep *every* repeated query parameter (item #13)."""
+    if form_value not in (None, "", []):
+        return form_value
+    values = query.getlist(name)
+    return values or None
+
+
 def _resolve_options(
     request: Request,
     dedupe_by: str | None,
@@ -40,19 +58,22 @@ def _resolve_options(
     email_columns: list[str] | None,
     output_format: str | None,
     delimiter: str | None,
+    include_quarantined: str | None,
 ) -> CleanOptions:
     query = request.query_params
     ignore_case = _pick("dedupe_ignore_case", dedupe_ignore_case, query)
     dayfirst = _pick("date_dayfirst", date_dayfirst, query)
+    quarantine = _pick("include_quarantined", include_quarantined, query)
     try:
         return CleanOptions(
             dedupe_by=_pick("dedupe_by", dedupe_by, query),
             dedupe_ignore_case=False if ignore_case is None else ignore_case,
-            date_columns=_pick("date_columns", date_columns, query),
+            date_columns=_pick_list("date_columns", date_columns, query),
             date_dayfirst=True if dayfirst is None else dayfirst,
-            email_columns=_pick("email_columns", email_columns, query),
+            email_columns=_pick_list("email_columns", email_columns, query),
             output_format=_pick("output_format", output_format, query) or "json",
             delimiter=_pick("delimiter", delimiter, query),
+            include_quarantined=False if quarantine is None else quarantine,
         )
     except ValidationError as exc:
         # Context values can hold raw exception objects (e.g. our delimiter
@@ -64,7 +85,23 @@ def _resolve_options(
 
 
 async def read_upload_limited(file: UploadFile) -> bytes:
-    """Read an upload in chunks, rejecting oversized files before buffering."""
+    """Read an upload in chunks, enforcing a cumulative size cap.
+
+    Starlette has usually already parsed and spooled the multipart body before
+    this handler runs, so this guard protects *handler* memory (it stops a
+    huge spooled file from being copied into a bytes object). The advertised
+    network-level limit belongs at the proxy / Content-Length middleware.
+    """
+    limit = csv_cleaner.MAX_FILE_BYTES
+    if file.size is not None and file.size > limit:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "Uploaded CSV exceeds the "
+                f"{limit // (1024 * 1024)} MB size limit."
+            ),
+        )
+
     chunks: list[bytes] = []
     total = 0
     while chunk := await file.read(UPLOAD_CHUNK_BYTES):
@@ -79,6 +116,15 @@ async def read_upload_limited(file: UploadFile) -> bytes:
             )
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _build_quarantine_zip(cleaned: bytes, quarantined: bytes) -> bytes:
+    """Bundle the cleaned data and its quarantine report into one download."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("cleaned.csv", cleaned)
+        archive.writestr("quarantined.csv", quarantined)
+    return buffer.getvalue()
 
 
 @router.post(
@@ -100,6 +146,7 @@ async def clean_csv(
     email_columns: Annotated[list[str] | None, Form()] = None,
     output_format: Annotated[str | None, Form()] = None,
     delimiter: Annotated[str | None, Form()] = None,
+    include_quarantined: Annotated[str | None, Form()] = None,
 ) -> Any:
     options = _resolve_options(
         request,
@@ -110,6 +157,7 @@ async def clean_csv(
         email_columns,
         output_format,
         delimiter,
+        include_quarantined,
     )
     data = await read_upload_limited(file)
     outcome = await run_in_threadpool(clean_csv_bytes, data, options)
@@ -125,11 +173,28 @@ async def clean_csv(
             "X-Quarantined-Rows": str(len(outcome.quarantined)),
             "X-Fixes-Applied": json.dumps(summary.fixes_applied, sort_keys=True),
             "X-Unknown-Columns-Ignored": json.dumps(outcome.ignored_columns),
+            "X-Warnings": json.dumps(
+                summary.warnings.model_dump(), sort_keys=True
+            ),
             "Content-Disposition": 'attachment; filename="cleaned.csv"',
         }
-        content = await run_in_threadpool(render_csv, outcome.frame)
+        cleaned = await run_in_threadpool(render_csv, outcome.frame)
+        if options.include_quarantined:
+            details = await run_in_threadpool(
+                render_quarantined_csv, outcome.quarantined
+            )
+            content = await run_in_threadpool(
+                _build_quarantine_zip, cleaned, details
+            )
+            zip_headers = dict(headers)
+            zip_headers["Content-Disposition"] = 'attachment; filename="cleaned.zip"'
+            return Response(
+                content=content,
+                media_type="application/zip",
+                headers=zip_headers,
+            )
         return Response(
-            content=content,
+            content=cleaned,
             media_type="text/csv",
             headers=headers,
         )

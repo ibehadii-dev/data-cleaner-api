@@ -47,11 +47,13 @@ def test_validate_required_missing_and_empty() -> None:
 
 
 def test_validate_nullable_allows_null_and_empty() -> None:
-    rules = {"note": FieldRule(nullable=True)}
+    rules = {"note": FieldRule(required=True, nullable=True)}
     records = [{"note": None}, {"note": ""}, {}]
     result = validate_records(records, rules)
-    assert len(result.valid) == 3
-    assert result.quarantined == []
+    # Null (including an absent field) satisfies nullable; a blank string does not.
+    assert result.valid == [{"note": None}, {}]
+    assert [row.row_index for row in result.quarantined] == [1]
+    assert result.quarantined[0].errors == ["'note' is required"]
 
 
 def test_validate_email_valid_and_invalid() -> None:
@@ -138,7 +140,9 @@ def test_validate_duplicate_keys_across_records_are_not_dropped() -> None:
 def test_validate_non_dict_record_is_quarantined() -> None:
     result = validate_records(["not an object"], {})
     assert result.quarantined[0].errors == ["record must be a JSON object"]
-    assert result.summary.rows_dropped == 1
+    assert result.summary.rows_dropped == 0  # quarantines are counted separately
+    assert result.summary.rows_in == 1
+    assert result.summary.quarantined_count == 1
 
 
 def test_validate_huge_integers_do_not_overflow() -> None:
@@ -165,3 +169,60 @@ def test_validate_integer_rejects_bool_like_int() -> None:
     rules = {"n": FieldRule(type="integer")}
     result = validate_records([{"n": True}], rules)
     assert result.quarantined[0].errors == ["'n' must be a number"]
+
+
+def test_validate_long_email_is_rejected_before_regex() -> None:
+    rules = {"email": FieldRule(type="email")}
+    long_email = "a" * 250 + "@b.com"  # 256 chars
+    pathological = "a." * 10_000 + "a@b.com"
+    result = validate_records(
+        [{"email": "ok@b.com"}, {"email": long_email}, {"email": pathological}],
+        rules,
+    )
+    assert result.valid == [{"email": "ok@b.com"}]
+    assert [row.row_index for row in result.quarantined] == [1, 2]
+
+
+def test_validate_numeric_strings_reject_underscores_and_exponents() -> None:
+    for kind in ("number", "integer"):
+        rules = {"n": FieldRule(type=kind)}
+        result = validate_records(
+            [
+                {"n": "1_000"},
+                {"n": "1e3"},
+                {"n": " 2 "},
+                {"n": "-3"},
+            ],
+            rules,
+        )
+        assert [row.row_index for row in result.quarantined] == [0, 1]
+        # Values are returned unchanged: validation never coerces.
+        assert [row["n"] for row in result.valid] == [" 2 ", "-3"]
+
+
+def test_validate_dates_match_the_cleaner_format_list() -> None:
+    rules = {"d": FieldRule(type="date")}
+    result = validate_records(
+        [
+            {"d": "2024-01-15T10:30:00"},
+            {"d": "2024-01-15T10:30:00+05:30"},
+            {"d": "2024-01-15T10:30:00.123456"},
+        ],
+        rules,
+    )
+    # The cleaner's strptime formats accept only the first of these.
+    assert result.valid == [{"d": "2024-01-15T10:30:00"}]
+    assert [row.row_index for row in result.quarantined] == [1, 2]
+
+
+def test_validate_summary_warnings_have_stable_keys() -> None:
+    result = validate_records([], {})
+    assert result.summary.warnings.model_dump() == {
+        "malformed_rows": 0,
+        "unknown_columns": [],
+    }
+    assert result.summary.rows_in == (
+        result.summary.rows_out
+        + result.summary.rows_dropped
+        + result.summary.quarantined_count
+    )

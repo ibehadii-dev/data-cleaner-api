@@ -1,7 +1,15 @@
 """Endpoint tests for POST /clean/csv."""
 
+import asyncio
+import csv
+import io
 import json
+import zipfile
 
+import pytest
+from fastapi import HTTPException
+
+from app.routers.clean import read_upload_limited
 from tests.conftest import csv_bytes, upload_csv
 
 
@@ -16,6 +24,7 @@ def test_clean_json_basic_shape(client) -> None:
         "rows_dropped",
         "blank_rows_skipped",
         "fixes_applied",
+        "warnings",
     }
     assert body["summary"]["rows_in"] == 1
     assert body["summary"]["rows_out"] == 1
@@ -46,7 +55,10 @@ def test_clean_json_all_options_applied(client) -> None:
         "dates_normalized": 3,
         "unparseable_dates": 1,
         "duplicates_removed": 1,
+    }
+    assert body["summary"]["warnings"] == {
         "malformed_rows": 0,
+        "unknown_columns": [],
     }
 
 
@@ -126,25 +138,17 @@ def test_clean_invalid_output_format_returns_422(client) -> None:
 
 
 def test_clean_list_options_via_repeated_form_fields(client) -> None:
-    # Build a raw multipart body so the same form key is sent twice.
-    boundary = "----repeated-field-boundary"
-    body = (
-        f"--{boundary}\r\n"
-        'Content-Disposition: form-data; name="file"; filename="data.csv"\r\n'
-        "Content-Type: text/csv\r\n\r\n"
-        "dob,signup\n15/03/2024,2024-01-15\n"
-        f"\r\n--{boundary}\r\n"
-        'Content-Disposition: form-data; name="date_columns"\r\n\r\n'
-        "dob\r\n"
-        f"--{boundary}\r\n"
-        'Content-Disposition: form-data; name="date_columns"\r\n\r\n'
-        "signup\r\n"
-        f"--{boundary}--\r\n"
-    ).encode()
+    # A dict-of-lists form value is sent as repeated fields by the test client.
     response = client.post(
         "/clean/csv",
-        content=body,
-        headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+        files={
+            "file": (
+                "data.csv",
+                b"dob,signup\n15/03/2024,2024-01-15\n",
+                "text/csv",
+            )
+        },
+        data={"date_columns": ["dob", "signup"]},
     )
     assert response.status_code == 200
     assert response.json()["data"] == [
@@ -158,7 +162,7 @@ def test_clean_list_options_via_json_encoded_string(client) -> None:
     )
     assert response.status_code == 200
     assert response.json()["data"] == [{"dob": "2024-03-15"}]
-    assert response.json()["summary"]["fixes_applied"]["unknown_columns_ignored"] == 1
+    assert response.json()["summary"]["warnings"]["unknown_columns"] == ["missing"]
 
 
 def test_clean_unknown_columns_are_ignored(client) -> None:
@@ -170,7 +174,12 @@ def test_clean_unknown_columns_are_ignored(client) -> None:
         dedupe_by="ghost",
     )
     assert response.status_code == 200
-    assert response.json()["summary"]["fixes_applied"]["unknown_columns_ignored"] == 3
+    # Order follows transform application: emails, dates, then dedupe.
+    assert response.json()["summary"]["warnings"]["unknown_columns"] == [
+        "nada",
+        "nope",
+        "ghost",
+    ]
 
 
 def test_clean_options_from_query_string(client) -> None:
@@ -202,7 +211,7 @@ def test_clean_json_reports_malformed_rows_with_reasons(client) -> None:
     assert summary["rows_in"] == 3
     assert summary["rows_out"] == 1
     assert summary["rows_dropped"] == 1
-    assert summary["fixes_applied"]["malformed_rows"] == 1
+    assert summary["warnings"]["malformed_rows"] == 1
     assert summary["rows_in"] == (
         summary["rows_out"] + summary["rows_dropped"] + len(body["quarantined"])
     )
@@ -341,8 +350,8 @@ def test_clean_json_does_not_materialise_records_with_to_dicts(client, monkeypat
                 "dates_normalized": 0,
                 "unparseable_dates": 0,
                 "duplicates_removed": 0,
-                "malformed_rows": 0,
             },
+            "warnings": {"malformed_rows": 0, "unknown_columns": []},
         },
         "quarantined": [],
     }
@@ -386,3 +395,74 @@ def test_clean_ambiguous_dates_are_reported(client) -> None:
     assert body["data"] == [{"d": "2024-04-03"}]
     assert body["summary"]["fixes_applied"]["ambiguous_dates"] == 1
     assert body["summary"]["rows_in"] == body["summary"]["rows_out"] == 1
+
+
+def test_clean_repeated_query_params_are_all_kept(client) -> None:
+    response = client.post(
+        "/clean/csv?date_columns=dob&date_columns=signup&output_format=json",
+        files={
+            "file": (
+                "data.csv",
+                b"dob,signup\n15/03/2024,2024-01-15\n",
+                "text/csv",
+            )
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"] == [{"dob": "2024-03-15", "signup": "2024-01-15"}]
+    assert body["summary"]["fixes_applied"]["dates_normalized"] == 2
+
+
+def test_clean_csv_zip_includes_quarantined_rows(client) -> None:
+    response = upload_csv(
+        client,
+        b"a,b\n1,2\n3,4,5\n",
+        output_format="csv",
+        include_quarantined="true",
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/zip")
+    assert 'filename="cleaned.zip"' in response.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert set(archive.namelist()) == {"cleaned.csv", "quarantined.csv"}
+        assert archive.read("cleaned.csv") == b"a,b\n1,2\n"
+        details = archive.read("quarantined.csv").decode("utf-8")
+    rows = list(csv.reader(io.StringIO(details)))
+    assert rows[0] == ["row_index", "record", "errors"]
+    assert rows[1][0] == "1"
+    assert json.loads(rows[1][1]) == ["3", "4", "5"]
+    assert "malformed row" in rows[1][2]
+
+
+def test_clean_csv_output_escapes_formulas_but_json_does_not(client) -> None:
+    csv_response = upload_csv(client, b"v\n=1+1\n", output_format="csv")
+    assert csv_response.status_code == 200
+    assert csv_response.text.strip() == "v\n'=1+1"
+
+    json_response = upload_csv(client, b"v\n=1+1\n")
+    assert json_response.json()["data"] == [{"v": "=1+1"}]
+
+
+def test_clean_csv_output_has_warnings_header(client) -> None:
+    response = upload_csv(client, b"a,b\n1,2,3\n", output_format="csv")
+    assert response.status_code == 200
+    assert json.loads(response.headers["x-warnings"]) == {
+        "malformed_rows": 1,
+        "unknown_columns": [],
+    }
+
+
+def test_read_upload_limited_rejects_oversized_file_size(monkeypatch) -> None:
+    from app.services import csv_cleaner
+
+    class FakeUpload:
+        size = 100
+
+        async def read(self, size: int) -> bytes:
+            return b"x" * size
+
+    monkeypatch.setattr(csv_cleaner, "MAX_FILE_BYTES", 10)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(read_upload_limited(FakeUpload()))
+    assert exc.value.status_code == 413

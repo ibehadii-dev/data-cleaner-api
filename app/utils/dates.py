@@ -58,18 +58,12 @@ def parse_date_string(value: Any) -> date | None:
     if not text:
         return None
 
+    # Only the shared DATE_FORMATS are accepted. This deliberately excludes
+    # ISO-8601 offsets / fractional seconds that the CSV cleaner cannot parse,
+    # so /validate/json and /clean/csv agree on what counts as a date.
     for fmt in DATE_FORMATS:
         try:
             return datetime.strptime(text, fmt).date()
         except ValueError:
             continue
-
-    # Final fallback for ISO-8601 strings with offsets / fractional seconds.
-    try:
-        return datetime.fromisoformat(text).date()
-    except ValueError:
-        return None
-    try:
-        return date.fromisoformat(text)
-    except ValueError:
-        return None
+    return None

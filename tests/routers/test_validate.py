@@ -44,8 +44,17 @@ def test_validate_endpoint_quarantine_structure(client) -> None:
     assert row["row_index"] == 0
     assert row["record"] == payload["records"][0]
     assert len(row["errors"]) == 3
-    assert body["summary"]["rows_dropped"] == 1
+    assert body["summary"]["rows_dropped"] == 0  # quarantines are counted separately
     assert body["summary"]["quarantined_count"] == 1
+    assert body["summary"]["warnings"] == {
+        "malformed_rows": 0,
+        "unknown_columns": [],
+    }
+    assert body["summary"]["rows_in"] == (
+        body["summary"]["rows_out"]
+        + body["summary"]["rows_dropped"]
+        + body["summary"]["quarantined_count"]
+    )
 
 
 def test_validate_endpoint_empty_array(client) -> None:
@@ -108,3 +117,22 @@ def test_validate_json_handler_is_synchronous() -> None:
     # A plain def makes FastAPI run the handler in a threadpool instead of
     # blocking the event loop with synchronous validation work.
     assert not inspect.iscoroutinefunction(validate_json)
+
+
+def test_validate_too_many_records_returns_422(client) -> None:
+    response = client.post(
+        "/validate/json",
+        json={"records": [{}] * 1001, "field_rules": {}},
+    )
+    assert response.status_code == 422
+
+
+def test_validate_body_size_limit_returns_413(client, monkeypatch) -> None:
+    import app.main as main
+
+    monkeypatch.setattr(main, "MAX_VALIDATE_BODY_BYTES", 10)
+    response = client.post(
+        "/validate/json", json={"records": [], "field_rules": {}}
+    )
+    assert response.status_code == 413
+    assert "exceeds" in response.json()["detail"]

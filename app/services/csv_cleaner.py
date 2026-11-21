@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 import polars as pl
 
 from ..schemas.clean import CleanOptions
-from ..schemas.common import QuarantinedRecord, SummaryReport
+from ..schemas.common import QuarantinedRecord, SummaryReport, WarningSummary
 from ..utils.dates import AMBIGUOUS_DATE_FORMATS, UNAMBIGUOUS_DATE_FORMATS
 from ..utils.errors import CsvReadError
 
@@ -492,14 +493,18 @@ def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
         "dates_normalized": dates_normalized,
         "unparseable_dates": unparseable,
         "duplicates_removed": duplicates_removed,
-        "malformed_rows": len(quarantined),
     }
     if ambiguous:
         fixes["ambiguous_dates"] = ambiguous
     if missing_keys:
         fixes["rows_missing_dedupe_key"] = missing_keys
-    if ignored:
-        fixes["unknown_columns_ignored"] = len(ignored)
+
+    # Data-quality warnings live in their own stable structure, with the
+    # ignored column *names* preserved (item #18).
+    warnings = WarningSummary(
+        malformed_rows=len(quarantined),
+        unknown_columns=list(ignored),
+    )
 
     summary = SummaryReport(
         rows_in=rows_in,
@@ -507,6 +512,7 @@ def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
         rows_dropped=(well_formed_rows - frame.height) + blank_rows_skipped,
         blank_rows_skipped=blank_rows_skipped,
         fixes_applied=fixes,
+        warnings=warnings,
     )
     return CleaningOutcome(
         frame=frame,
@@ -516,6 +522,42 @@ def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
     )
 
 
-def render_csv(frame: pl.DataFrame) -> bytes:
-    """Serialise a cleaned frame back to UTF-8 CSV bytes."""
+_FORMULA_PREFIX_RE = r"^[=+\-@]"
+
+
+def render_csv(frame: pl.DataFrame, escape_formulas: bool = True) -> bytes:
+    """Serialise a cleaned frame back to UTF-8 CSV bytes.
+
+    Cells starting with ``=``, ``+``, ``-`` or ``@`` are prefixed with a single
+    quote so spreadsheets treat them as text. This affects CSV output only;
+    the JSON records returned by the API stay unchanged (item #20).
+    """
+    if escape_formulas and frame.width:
+        expressions = []
+        for column in frame.columns:
+            value = pl.col(column).cast(pl.String)
+            risky = value.str.contains(_FORMULA_PREFIX_RE)
+            expressions.append(
+                pl.when(risky)
+                .then(pl.lit("'") + value)
+                .otherwise(value)
+                .alias(column)
+            )
+        frame = frame.select(expressions)
     return frame.write_csv().encode("utf-8")
+
+
+def render_quarantined_csv(quarantined: list[QuarantinedRecord]) -> bytes:
+    """Render quarantined rows as a UTF-8 CSV companion for ZIP downloads."""
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(["row_index", "record", "errors"])
+    for row in quarantined:
+        writer.writerow(
+            [
+                row.row_index,
+                json.dumps(row.record, ensure_ascii=False),
+                json.dumps(row.errors, ensure_ascii=False),
+            ]
+        )
+    return buffer.getvalue().encode("utf-8")

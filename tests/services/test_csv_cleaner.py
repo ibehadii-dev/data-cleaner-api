@@ -1,5 +1,8 @@
 """Unit tests for the pure Polars CSV cleaning transforms."""
 
+import csv
+import io
+
 import polars as pl
 import pytest
 
@@ -14,7 +17,9 @@ from app.services.csv_cleaner import (
     read_csv_bytes,
     read_csv_bytes_with_quarantine,
     render_csv,
+    render_quarantined_csv,
 )
+from app.schemas.common import QuarantinedRecord
 from app.utils.errors import CsvReadError
 
 
@@ -361,7 +366,10 @@ def test_clean_csv_bytes_summary_counts_are_consistent() -> None:
         "dates_normalized": 2,
         "unparseable_dates": 0,
         "duplicates_removed": 1,
+    }
+    assert outcome.summary.warnings.model_dump() == {
         "malformed_rows": 0,
+        "unknown_columns": [],
     }
     # Dedupe keeps the *first* occurrence after normalisation.
     assert outcome.frame.to_dicts() == [
@@ -375,7 +383,8 @@ def test_clean_csv_bytes_reports_unknown_columns() -> None:
     )
     outcome = clean_csv_bytes(b"a\n1\n", options)
     assert outcome.ignored_columns == ["nada", "nope", "ghost"]
-    assert outcome.summary.fixes_applied["unknown_columns_ignored"] == 3
+    assert outcome.summary.warnings.unknown_columns == ["nada", "nope", "ghost"]
+    assert outcome.summary.warnings.malformed_rows == 0
     assert outcome.summary.rows_dropped == 0
 
 
@@ -394,7 +403,7 @@ def test_clean_csv_bytes_malformed_rows_reconcile_with_dedupe() -> None:
     assert outcome.summary.rows_in == 4
     assert outcome.summary.rows_out == 2
     assert outcome.summary.rows_dropped == 1
-    assert outcome.summary.fixes_applied["malformed_rows"] == 1
+    assert outcome.summary.warnings.malformed_rows == 1
     assert len(outcome.quarantined) == 1
     assert outcome.quarantined[0].record == ["2", "Bob", "extra"]
     assert (
@@ -412,7 +421,7 @@ def test_clean_csv_bytes_all_malformed_rows_are_quarantined() -> None:
     assert outcome.summary.rows_in == 2
     assert outcome.summary.rows_out == 0
     assert outcome.summary.rows_dropped == 0
-    assert outcome.summary.fixes_applied["malformed_rows"] == 2
+    assert outcome.summary.warnings.malformed_rows == 2
 
 
 def test_clean_csv_bytes_unparseable_dates_are_counted_not_quarantined() -> None:
@@ -526,3 +535,31 @@ def test_clean_csv_bytes_date_dayfirst_option() -> None:
     )
     assert day.frame.to_dicts() == [{"d": "2024-06-05"}]
     assert month.frame.to_dicts() == [{"d": "2024-05-06"}]
+
+
+def test_render_csv_escapes_formula_prefixes() -> None:
+    frame = pl.DataFrame({"v": ["=1+1", "+x", "-y", "@SUM(A1)", "plain", None]})
+    assert render_csv(frame) == b"v\n'=1+1\n'+x\n'-y\n'@SUM(A1)\nplain\n\n"
+    # JSON mode uses the frame directly, so the data must remain untouched.
+    assert frame.to_dicts()[0] == {"v": "=1+1"}
+
+
+def test_render_csv_can_disable_formula_escaping() -> None:
+    frame = pl.DataFrame({"v": ["=1+1"]})
+    assert render_csv(frame, escape_formulas=False) == b"v\n=1+1\n"
+
+
+def test_render_quarantined_csv_preserves_reasons() -> None:
+    rows = [
+        QuarantinedRecord(
+            row_index=1,
+            record=["2", "Bob", "extra"],
+            errors=["malformed row: expected 2 columns, found 3"],
+        )
+    ]
+    text = render_quarantined_csv(rows).decode("utf-8")
+    rows_out = list(csv.reader(io.StringIO(text)))
+    assert rows_out[0] == ["row_index", "record", "errors"]
+    assert rows_out[1][0] == "1"
+    assert rows_out[1][1] == '["2", "Bob", "extra"]'
+    assert rows_out[1][2] == '["malformed row: expected 2 columns, found 3"]'

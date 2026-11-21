@@ -19,6 +19,7 @@ class CleanOptions(StrictModel):
     email_columns: list[str] = []
     output_format: Literal["json", "csv"] = "json"
     delimiter: str | None = None
+    include_quarantined: bool = False
 
     @field_validator("delimiter", mode="before")
     @classmethod
