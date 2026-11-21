@@ -127,6 +127,17 @@ def test_validate_too_many_records_returns_422(client) -> None:
     assert response.status_code == 422
 
 
+def test_validate_endpoint_reports_processing_time(client) -> None:
+    response = client.post(
+        "/validate/json",
+        json={"records": [{"email": "a@b.com"}], "field_rules": FIELD_RULES},
+    )
+    assert response.status_code == 200
+    timing = response.json()["summary"]["processing_time_ms"]
+    assert timing >= 0
+    assert response.headers["x-processing-time-ms"] == str(timing)
+
+
 def test_validate_body_size_limit_returns_413(client, monkeypatch) -> None:
     import app.main as main
 

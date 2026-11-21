@@ -10,6 +10,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.routers.clean import read_upload_limited
+from app.routers.demo import FALLBACK_MESSY_LEADS_CSV
 from tests.conftest import csv_bytes, upload_csv
 
 
@@ -25,7 +26,9 @@ def test_clean_json_basic_shape(client) -> None:
         "blank_rows_skipped",
         "fixes_applied",
         "warnings",
+        "processing_time_ms",
     }
+    assert body["summary"]["processing_time_ms"] >= 0
     assert body["summary"]["rows_in"] == 1
     assert body["summary"]["rows_out"] == 1
     assert body["summary"]["rows_dropped"] == 0
@@ -338,7 +341,9 @@ def test_clean_json_does_not_materialise_records_with_to_dicts(client, monkeypat
     monkeypatch.setattr(pl.DataFrame, "to_dicts", forbidden)
     response = upload_csv(client, b"a,b\n1,2\n")
     assert response.status_code == 200
-    assert response.json() == {
+    body = response.json()
+    assert body["summary"].pop("processing_time_ms") >= 0
+    assert body == {
         "data": [{"a": "1", "b": "2"}],
         "summary": {
             "rows_in": 1,
@@ -466,3 +471,111 @@ def test_read_upload_limited_rejects_oversized_file_size(monkeypatch) -> None:
     with pytest.raises(HTTPException) as exc:
         asyncio.run(read_upload_limited(FakeUpload()))
     assert exc.value.status_code == 413
+
+
+def test_clean_json_reports_processing_time(client) -> None:
+    response = upload_csv(client, b"a,b\n1,2\n")
+    assert response.status_code == 200
+    summary = response.json()["summary"]
+    assert summary["processing_time_ms"] >= 0
+    assert response.headers["x-processing-time-ms"] == str(
+        summary["processing_time_ms"]
+    )
+
+
+def test_clean_csv_output_reports_processing_time(client) -> None:
+    response = upload_csv(client, b"a,b\n1,2\n", output_format="csv")
+    assert response.status_code == 200
+    timing = float(response.headers["x-processing-time-ms"])
+    assert timing >= 0
+
+    zipped = upload_csv(
+        client,
+        b"a,b\n1,2\n3,4,5\n",
+        output_format="csv",
+        include_quarantined="true",
+    )
+    assert zipped.status_code == 200
+    assert float(zipped.headers["x-processing-time-ms"]) >= 0
+
+
+def test_demo_messy_leads_json_mode(client) -> None:
+    response = client.post("/demo/messy-leads")
+    assert response.status_code == 200
+    body = response.json()
+    summary = body["summary"]
+    assert summary["processing_time_ms"] >= 0
+    assert response.headers["x-processing-time-ms"] == str(
+        summary["processing_time_ms"]
+    )
+    assert summary["rows_in"] == 7
+    assert summary["rows_out"] == 3
+    assert summary["rows_dropped"] == 3
+    assert len(body["quarantined"]) == 1
+    assert summary["rows_in"] == (
+        summary["rows_out"] + summary["rows_dropped"] + len(body["quarantined"])
+    )
+    assert [row["email"] for row in body["data"]] == [
+        "ada@example.com",
+        "grace@navy.mil",
+        None,
+    ]
+
+
+def test_demo_messy_leads_accepts_form_output_format(client) -> None:
+    response = client.post("/demo/messy-leads", data={"output_format": "csv"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert float(response.headers["x-processing-time-ms"]) >= 0
+    assert response.headers["x-rows-in"] == "7"
+    assert response.headers["x-quarantined-rows"] == "1"
+    assert "full_name,email,created_at,company" in response.text
+
+
+def test_demo_messy_leads_query_output_format_matches_clean_csv(client) -> None:
+    demo_response = client.post("/demo/messy-leads?output_format=csv")
+    clean_response = upload_csv(
+        client,
+        FALLBACK_MESSY_LEADS_CSV.encode("utf-8"),
+        dedupe_by="email",
+        dedupe_ignore_case="true",
+        date_columns=["created_at"],
+        email_columns=["email"],
+        output_format="csv",
+    )
+    assert demo_response.status_code == clean_response.status_code == 200
+    assert demo_response.text == clean_response.text
+    for header in (
+        "x-rows-in",
+        "x-rows-out",
+        "x-rows-dropped",
+        "x-quarantined-rows",
+        "x-fixes-applied",
+        "x-warnings",
+    ):
+        assert demo_response.headers[header] == clean_response.headers[header]
+
+
+def test_demo_messy_leads_invalid_output_format_returns_422(client) -> None:
+    response = client.post("/demo/messy-leads?output_format=yaml")
+    assert response.status_code == 422
+
+
+def test_demo_messy_leads_falls_back_when_sample_file_missing(client, monkeypatch, tmp_path) -> None:
+    import app.routers.demo as demo_router
+
+    monkeypatch.setattr(demo_router, "DEMO_CSV_PATH", tmp_path / "missing.csv")
+    response = client.post("/demo/messy-leads")
+    assert response.status_code == 200
+    assert response.json()["summary"]["rows_in"] == 7
+
+
+def test_demo_messy_leads_reads_repo_sample_when_present(client, monkeypatch, tmp_path) -> None:
+    import app.routers.demo as demo_router
+
+    sample = tmp_path / "test_messy_leads.csv"
+    sample.write_bytes(b"x,y\n1,2\n")
+    monkeypatch.setattr(demo_router, "DEMO_CSV_PATH", sample)
+    response = client.post("/demo/messy-leads")
+    assert response.status_code == 200
+    assert response.json()["data"] == [{"x": "1", "y": "2"}]

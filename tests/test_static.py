@@ -7,6 +7,9 @@ def test_index_serves_frontend(client) -> None:
     assert response.headers["content-type"].startswith("text/html")
     assert "data-cleaner-api" in response.text
     assert "Load Messy Sample" in response.text
+    assert 'id="demoBtn"' in response.text
+    assert "Run Server Demo (/demo/messy-leads)" in response.text
+    assert 'id="processingTime"' in response.text
     assert 'id="csvText"' in response.text
 
 

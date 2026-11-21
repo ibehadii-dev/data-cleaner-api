@@ -33,6 +33,7 @@ class ValidateSummary(StrictModel):
     quarantined_count: int
     errors_by_field: dict[str, int] = {}
     warnings: WarningSummary = Field(default_factory=WarningSummary)
+    processing_time_ms: float = Field(default=0.0, ge=0.0)
 
 
 class ValidateResponse(StrictModel):

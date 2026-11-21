@@ -16,6 +16,7 @@ from ..schemas.clean import CleanJsonResponse, CleanOptions
 from ..schemas.common import ErrorResponse
 from ..services import csv_cleaner
 from ..services.csv_cleaner import (
+    CleaningOutcome,
     clean_csv_bytes,
     render_csv,
     render_quarantined_csv,
@@ -127,6 +128,70 @@ def _build_quarantine_zip(cleaned: bytes, quarantined: bytes) -> bytes:
     return buffer.getvalue()
 
 
+async def build_clean_response(
+    outcome: CleaningOutcome,
+    output_format: str,
+    include_quarantined: bool = False,
+) -> Response:
+    """Render a cleaning outcome as the canonical JSON or CSV HTTP response.
+
+    Shared by ``/clean/csv`` and ``/demo/messy-leads`` so both return identical
+    bodies, headers (including ``X-Processing-Time-Ms``) and status codes.
+    """
+    summary = outcome.summary
+    timing_header = {"X-Processing-Time-Ms": str(summary.processing_time_ms)}
+
+    if output_format == "csv":
+        headers = {
+            "X-Rows-In": str(summary.rows_in),
+            "X-Rows-Out": str(summary.rows_out),
+            "X-Rows-Dropped": str(summary.rows_dropped),
+            "X-Blank-Rows-Skipped": str(summary.blank_rows_skipped),
+            "X-Quarantined-Rows": str(len(outcome.quarantined)),
+            "X-Fixes-Applied": json.dumps(summary.fixes_applied, sort_keys=True),
+            "X-Unknown-Columns-Ignored": json.dumps(outcome.ignored_columns),
+            "X-Warnings": json.dumps(summary.warnings.model_dump(), sort_keys=True),
+            "Content-Disposition": 'attachment; filename="cleaned.csv"',
+            **timing_header,
+        }
+        cleaned = await run_in_threadpool(render_csv, outcome.frame)
+        if include_quarantined:
+            details = await run_in_threadpool(
+                render_quarantined_csv, outcome.quarantined
+            )
+            content = await run_in_threadpool(_build_quarantine_zip, cleaned, details)
+            zip_headers = dict(headers)
+            zip_headers["Content-Disposition"] = 'attachment; filename="cleaned.zip"'
+            return Response(
+                content=content,
+                media_type="application/zip",
+                headers=zip_headers,
+            )
+        return Response(content=cleaned, media_type="text/csv", headers=headers)
+
+    # Stream Polars' own row-oriented JSON straight into the response body.
+    # Building to_dicts() plus a second Pydantic list would double peak memory.
+    records_json = await run_in_threadpool(outcome.frame.write_json)
+    quarantined_json = json.dumps(
+        [row.model_dump(mode="json") for row in outcome.quarantined],
+        ensure_ascii=False,
+    )
+    body = (
+        '{"data":'
+        + records_json
+        + ',"summary":'
+        + summary.model_dump_json()
+        + ',"quarantined":'
+        + quarantined_json
+        + "}"
+    )
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers=timing_header,
+    )
+
+
 @router.post(
     "/csv",
     response_model=CleanJsonResponse,
@@ -162,58 +227,6 @@ async def clean_csv(
     data = await read_upload_limited(file)
     outcome = await run_in_threadpool(clean_csv_bytes, data, options)
     del data  # the frame and summary are all that remain of the upload
-
-    if options.output_format == "csv":
-        summary = outcome.summary
-        headers = {
-            "X-Rows-In": str(summary.rows_in),
-            "X-Rows-Out": str(summary.rows_out),
-            "X-Rows-Dropped": str(summary.rows_dropped),
-            "X-Blank-Rows-Skipped": str(summary.blank_rows_skipped),
-            "X-Quarantined-Rows": str(len(outcome.quarantined)),
-            "X-Fixes-Applied": json.dumps(summary.fixes_applied, sort_keys=True),
-            "X-Unknown-Columns-Ignored": json.dumps(outcome.ignored_columns),
-            "X-Warnings": json.dumps(
-                summary.warnings.model_dump(), sort_keys=True
-            ),
-            "Content-Disposition": 'attachment; filename="cleaned.csv"',
-        }
-        cleaned = await run_in_threadpool(render_csv, outcome.frame)
-        if options.include_quarantined:
-            details = await run_in_threadpool(
-                render_quarantined_csv, outcome.quarantined
-            )
-            content = await run_in_threadpool(
-                _build_quarantine_zip, cleaned, details
-            )
-            zip_headers = dict(headers)
-            zip_headers["Content-Disposition"] = 'attachment; filename="cleaned.zip"'
-            return Response(
-                content=content,
-                media_type="application/zip",
-                headers=zip_headers,
-            )
-        return Response(
-            content=cleaned,
-            media_type="text/csv",
-            headers=headers,
-        )
-
-    # Stream Polars' own row-oriented JSON straight into the response body.
-    # Building to_dicts() plus a second Pydantic list would double peak memory.
-    records_json = await run_in_threadpool(outcome.frame.write_json)
-    summary_json = outcome.summary.model_dump_json()
-    quarantined_json = json.dumps(
-        [row.model_dump(mode="json") for row in outcome.quarantined],
-        ensure_ascii=False,
+    return await build_clean_response(
+        outcome, options.output_format, options.include_quarantined
     )
-    body = (
-        '{"data":'
-        + records_json
-        + ',"summary":'
-        + summary_json
-        + ',"quarantined":'
-        + quarantined_json
-        + "}"
-    )
-    return Response(content=body, media_type="application/json")

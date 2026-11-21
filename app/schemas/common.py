@@ -25,6 +25,7 @@ class SummaryReport(StrictModel):
     blank_rows_skipped: int = 0
     fixes_applied: dict[str, int] = {}
     warnings: WarningSummary = Field(default_factory=WarningSummary)
+    processing_time_ms: float = Field(default=0.0, ge=0.0)
 
 
 class QuarantinedRecord(StrictModel):

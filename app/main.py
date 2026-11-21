@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .routers import clean, validate
+from .routers import clean, demo, validate
 from .services.csv_cleaner import MAX_FILE_BYTES
 from .utils.errors import CsvReadError
 
@@ -48,6 +48,7 @@ async def index() -> FileResponse:
 
 app.include_router(clean.router)
 app.include_router(validate.router)
+app.include_router(demo.router)
 
 
 @app.middleware("http")

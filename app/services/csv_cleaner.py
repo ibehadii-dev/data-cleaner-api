@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -463,6 +464,7 @@ def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
     len(quarantined)``: malformed and blank rows count in ``rows_in`` but never
     in ``rows_out``, so both are accounted for in ``rows_dropped``.
     """
+    t0 = time.perf_counter()
     result = read_csv_with_report(data, options.delimiter)
     del data
 
@@ -513,6 +515,7 @@ def clean_csv_bytes(data: bytes, options: CleanOptions) -> CleaningOutcome:
         blank_rows_skipped=blank_rows_skipped,
         fixes_applied=fixes,
         warnings=warnings,
+        processing_time_ms=round((time.perf_counter() - t0) * 1000, 2),
     )
     return CleaningOutcome(
         frame=frame,

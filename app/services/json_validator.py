@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 from typing import Any
 
 from ..schemas.common import WarningSummary
@@ -92,6 +93,7 @@ def validate_records(
     records: list[dict[str, Any]], field_rules: dict[str, FieldRule]
 ) -> ValidateResponse:
     """Validate every record, quarantining invalid ones with all their errors."""
+    t0 = time.perf_counter()
     valid: list[dict[str, Any]] = []
     quarantined: list[QuarantinedRecord] = []
     errors_by_field: dict[str, int] = {}
@@ -149,6 +151,7 @@ def validate_records(
         quarantined_count=len(quarantined),
         errors_by_field=errors_by_field,
         warnings=WarningSummary(),
+        processing_time_ms=round((time.perf_counter() - t0) * 1000, 2),
     )
     return ValidateResponse(
         valid=valid, quarantined=quarantined, summary=summary
