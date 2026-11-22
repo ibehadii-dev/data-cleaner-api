@@ -50,9 +50,9 @@ Tailwind CSS via CDN + vanilla JavaScript, no build step. Drag-and-drop or brows
 
 ## Verification
 
-- `python -m pytest -v` (2026-11-22, session wrap-up): **216 passed**, 0 failed, 0 skipped, 1.13 s.
-- Runtime invariant probe against the live app: `/clean/csv` and `/demo/messy-leads` each `7 in = 3 out + 3 dropped + 1 quarantined`; `/validate/json` `2 in = 1 out + 0 dropped + 1 quarantined`. Schema field sets and `dict[str,int]` fixes verified.
-- Pre-exit contract probes (TestClient, 2026-11-22): `/clean/csv` `4 in = 2 out + 1 dropped + 1 quarantined`, `/validate/json` `2 in = 1 out + 0 dropped + 1 quarantined_count`, `/demo/messy-leads` `7 in = 3 out + 3 dropped + 1 quarantined`. `QuarantinedRecord` field sets and `dict[str,int]` `fixes_applied` asserted on every response.
+- `python -m pytest -v` (2026-11-22, pre-exit handoff): **216 passed**, 0 failed, 0 skipped, 0.99 s.
+- Pre-exit contract probes (TestClient, 2026-11-22): `/clean/csv` `4 in = 3 out + 0 dropped + 1 quarantined`; `/demo/messy-leads` `7 in = 3 out + 3 dropped + 1 quarantined`; `/validate/json` `3 in = 2 out + 0 dropped + 1 quarantined_count`. The shared reconciliation invariant, `QuarantinedRecord` field sets (`row_index`, `record`, `errors`) and `dict[str, int]` `fixes_applied` were asserted on every response; all passed.
+- Browser verification of the intro badge: element rendered with `position: fixed`, `pointer-events: none`, `top: 16px`; opacity sampled through the keyframes as `0 → 1 → hold → 0`, and cleanup confirmed `display: flex → none`.
 - `python scripts/smoke.py` exercises the endpoints over real HTTP.
 
 ## Completed since previous handoff
@@ -63,7 +63,8 @@ Tailwind CSS via CDN + vanilla JavaScript, no build step. Drag-and-drop or brows
 4. `e12a68a` — company entity normalization and fuzzy deduplication.
 5. `fe036e8` — six ADRs documenting the contracts and trade-offs.
 6. `99a99a1` — UI "wow-factor" pass in `static/index.html`: Chaos Lab injection, inferred cell-level before/after diffs with changed-only toggle, quarantine reason pills, and a client-generated quarantined CSV export. Backend contracts untouched.
-7. Uncommitted — added a subtle intro credit badge ("a project by ibehadii") to `static/index.html`: fixed, `pointer-events-none`, top-center glass card. CSS keyframes fade in (~0.3s), hold (~2.2s), fade out (~0.8s) to `opacity: 0`; JS hides it on `animationend` (reduced-motion holds ~2.2s then hides without animation). An explicit `#introBadge.hidden { display: none; }` rule is required because the ID selector otherwise outranks Tailwind's `.hidden` and the cleanup class has no effect. Presentational only — cleaning, chaos, diff, quarantine and export behavior unchanged; no backend/schema/test edits.
+7. `e476ab6` — added a subtle intro credit badge ("a project by ibehadii") to `static/index.html`: fixed, `pointer-events-none`, top-center glass card. CSS keyframes fade in (~0.3s), hold (~2.2s), fade out (~0.8s) to `opacity: 0`; JS hides it on `animationend` (reduced-motion holds ~2.2s then hides without animation). Presentational only — cleaning, chaos, diff, quarantine and export behavior unchanged; no backend/schema/test edits.
+8. `b0fd36d` — fixed the badge cleanup: added `#introBadge.hidden { display: none; }` because the ID selector otherwise outranks Tailwind's `.hidden`, leaving the badge on screen forever in reduced-motion mode. Verified in-browser (`display: flex → none`) and with a keyframe opacity probe. Presentational only; no architectural rule or data contract changed, so no ADR was added.
 
 ## Known bugs / tech debt / deferred edge cases
 
@@ -77,6 +78,7 @@ Tailwind CSS via CDN + vanilla JavaScript, no build step. Drag-and-drop or brows
 8. `processing_time_ms` is measured inside the pure service functions, so it excludes HTTP parsing and response serialization.
 9. `read_csv_bytes()` is a frame-only wrapper; callers needing quarantine reasons must use `read_csv_bytes_with_quarantine()`.
 10. **UI cell diffs are heuristic.** The API returns no per-cell lineage or source indices for cleaned rows, so `static/index.html` re-parses the submitted text and matches rows in order with a conservative similarity score. Unmatched rows are left unannotated; reason tags are inferred from the configured column roles, not returned by the server.
+11. **Intro badge is one-shot and brief.** It appears only for ~3.3 s on each page load (top-center, small, muted), so users who look later miss it; a tab already showing cached HTML will not replay it until reloaded. Presentational only.
 
 ## Next 3 steps
 
