@@ -88,6 +88,8 @@
       opacity: 0;
       animation: introBadgeFade 3.3s ease-in-out forwards;
     }
+    /* ID selector beats Tailwind's .hidden so cleanup actually hides it. */
+    #introBadge.hidden { display: none; }
     #introBadge .intro-dot {
       width: 6px;
       height: 6px;

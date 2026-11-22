@@ -63,7 +63,7 @@ Tailwind CSS via CDN + vanilla JavaScript, no build step. Drag-and-drop or brows
 4. `e12a68a` — company entity normalization and fuzzy deduplication.
 5. `fe036e8` — six ADRs documenting the contracts and trade-offs.
 6. `99a99a1` — UI "wow-factor" pass in `static/index.html`: Chaos Lab injection, inferred cell-level before/after diffs with changed-only toggle, quarantine reason pills, and a client-generated quarantined CSV export. Backend contracts untouched.
-7. Uncommitted — added a subtle intro credit badge ("a project by ibehadii") to `static/index.html`: fixed, `pointer-events-none`, top-center glass card. CSS keyframes fade in (~0.3s), hold (~2.2s), fade out (~0.8s) to `opacity: 0`; JS hides it on `animationend` (reduced-motion holds ~2.2s then hides without animation). Presentational only — cleaning, chaos, diff, quarantine and export behavior unchanged; no backend/schema/test edits.
+7. Uncommitted — added a subtle intro credit badge ("a project by ibehadii") to `static/index.html`: fixed, `pointer-events-none`, top-center glass card. CSS keyframes fade in (~0.3s), hold (~2.2s), fade out (~0.8s) to `opacity: 0`; JS hides it on `animationend` (reduced-motion holds ~2.2s then hides without animation). An explicit `#introBadge.hidden { display: none; }` rule is required because the ID selector otherwise outranks Tailwind's `.hidden` and the cleanup class has no effect. Presentational only — cleaning, chaos, diff, quarantine and export behavior unchanged; no backend/schema/test edits.
 
 ## Known bugs / tech debt / deferred edge cases
 
