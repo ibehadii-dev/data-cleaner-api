@@ -53,6 +53,7 @@ Tailwind CSS via CDN + vanilla JavaScript, no build step. Drag-and-drop or brows
 - `python -m pytest -v` (2026-11-22, pre-exit handoff): **216 passed**, 0 failed, 0 skipped, 0.99 s.
 - Pre-exit contract probes (TestClient, 2026-11-22): `/clean/csv` `4 in = 3 out + 0 dropped + 1 quarantined`; `/demo/messy-leads` `7 in = 3 out + 3 dropped + 1 quarantined`; `/validate/json` `3 in = 2 out + 0 dropped + 1 quarantined_count`. The shared reconciliation invariant, `QuarantinedRecord` field sets (`row_index`, `record`, `errors`) and `dict[str, int]` `fixes_applied` were asserted on every response; all passed.
 - Browser verification of the intro badge: element rendered with `position: fixed`, `pointer-events: none`, `top: 16px`; opacity sampled through the keyframes as `0 → 1 → hold → 0`, and cleanup confirmed `display: flex → none`.
+- Final pre-exit re-verification (2026-11-22, this session): `python -m pytest -v` → **216 passed in 0.97 s**, 0 failed, 0 skipped. Independent TestClient probes: `/clean/csv` `5 in = 3 out + 1 dropped + 1 quarantined`, `/demo/messy-leads` `7 in = 3 out + 3 dropped + 1 quarantined`, `/validate/json` `2 in = 1 out + 0 dropped + 1 quarantined_count`; `QuarantinedRecord` field validation and `dict[str, int]` `fixes_applied` asserted on every response. Working tree clean at `f4d1b00`; no `.env`/secret files or stray untracked files (only gitignored `__pycache__/`, `.pytest_cache/`), and no lingering test/server processes. The six ADRs and their index were re-checked and need no update.
 - `python scripts/smoke.py` exercises the endpoints over real HTTP.
 
 ## Completed since previous handoff
@@ -65,8 +66,11 @@ Tailwind CSS via CDN + vanilla JavaScript, no build step. Drag-and-drop or brows
 6. `99a99a1` — UI "wow-factor" pass in `static/index.html`: Chaos Lab injection, inferred cell-level before/after diffs with changed-only toggle, quarantine reason pills, and a client-generated quarantined CSV export. Backend contracts untouched.
 7. `e476ab6` — added a subtle intro credit badge ("a project by ibehadii") to `static/index.html`: fixed, `pointer-events-none`, top-center glass card. CSS keyframes fade in (~0.3s), hold (~2.2s), fade out (~0.8s) to `opacity: 0`; JS hides it on `animationend` (reduced-motion holds ~2.2s then hides without animation). Presentational only — cleaning, chaos, diff, quarantine and export behavior unchanged; no backend/schema/test edits.
 8. `b0fd36d` — fixed the badge cleanup: added `#introBadge.hidden { display: none; }` because the ID selector otherwise outranks Tailwind's `.hidden`, leaving the badge on screen forever in reduced-motion mode. Verified in-browser (`display: flex → none`) and with a keyframe opacity probe. Presentational only; no architectural rule or data contract changed, so no ADR was added.
+9. 2026-11-22 (this session) — pre-exit audit: re-checked the ADR suite and doc links against the code, re-ran the full test suite, probed live contracts, and audited the working tree for stray files, artifacts, secrets and background processes. No application logic, schemas, tests or ADRs changed — no architectural rule or data contract was introduced.
 
 ## Known bugs / tech debt / deferred edge cases
+
+No new issues were found during the 2026-11-22 pre-exit re-verification; the list below is unchanged.
 
 1. **Body-size guards are header-based.** The middleware relies on `Content-Length`, which a client can omit. The chunked upload cap and `file.size` pre-check still bound handler memory; enforce the real limit at the reverse proxy.
 2. **`warnings.malformed_rows` merges signals.** It equals the total quarantine count, including invalid-phone rows as well as structurally ragged CSV rows; callers cannot distinguish them from that field alone.
