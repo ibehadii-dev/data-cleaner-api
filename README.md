@@ -92,3 +92,7 @@ The frontend displays this value as a timing badge next to the reconciliation ba
 ## CI
 
 `.github/workflows/test.yml` runs `pytest -v` on pushes and pull requests to `main` using Python 3.11.
+
+## Architecture Decision Records
+
+The decisions behind the stack, row-reconciliation contract, ingestion guardrails, validation hardening, normalization rules, presets, exports and telemetry are recorded in [`docs/adr/README.md`](docs/adr/README.md).

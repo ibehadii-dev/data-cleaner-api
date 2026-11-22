@@ -25,3 +25,6 @@ FastAPI microservice for cleaning messy CSV exports and validating JSON payloads
 
 ## Verification
 - Run `pytest -v` after any code change and fix all failures before finishing.
+
+## Architecture Decision Records
+- Read [`docs/adr/README.md`](docs/adr/README.md) before modifying schemas, reconciliation rules, validation, or the cleaning pipeline. In particular, ADR-0002 (row reconciliation and quarantines), ADR-0004 (validation hardening and formula escaping), ADR-0005 (deduplication, date, phone and company normalization), and ADR-0006 (presets, exports and telemetry) record the decisions those changes must preserve.
