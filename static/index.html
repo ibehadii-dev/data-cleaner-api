@@ -11,6 +11,58 @@
     #dropzone.drag-over p:first-of-type { color: #4338ca; }
     pre { white-space: pre; }
     .table-scroll { max-height: 26rem; }
+    /* Chaos Lab */
+    .chaos-chip {
+      border-radius: 9999px;
+      border: 1px solid #e9d5ff;
+      background: rgba(255, 255, 255, .85);
+      padding: .25rem .65rem;
+      font-size: 11px;
+      font-weight: 600;
+      color: #86198f;
+      transition: all .15s ease;
+    }
+    .chaos-chip:hover { border-color: #c026d3; background: #fff; }
+    .chaos-chip[aria-pressed="true"] {
+      border-color: #a21caf;
+      background: #a21caf;
+      color: #fff;
+      box-shadow: 0 1px 2px rgba(162, 28, 175, .25);
+    }
+    .chaos-chip:focus-visible { outline: 2px solid #c026d3; outline-offset: 2px; }
+    /* Cell-level diff styling */
+    .diff-after { font-weight: 600; color: #0f172a; }
+    .diff-before {
+      display: inline-block;
+      border-radius: .25rem;
+      background: #fff1f2;
+      padding: 0 .35rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px;
+      color: #be123c;
+      text-decoration: line-through;
+      text-decoration-color: #fda4af;
+    }
+    .reason-pill {
+      display: inline-block;
+      white-space: nowrap;
+      border-radius: 9999px;
+      background: #eef2ff;
+      padding: 0 .45rem;
+      font-size: 10px;
+      font-weight: 600;
+      color: #4338ca;
+    }
+    .reason-pill.formula { background: #fef3c7; color: #92400e; }
+    .error-pill {
+      display: inline-block;
+      border-radius: 9999px;
+      background: #ffe4e6;
+      padding: .1rem .5rem;
+      font-size: 10px;
+      font-weight: 600;
+      color: #be123c;
+    }
     ::-webkit-scrollbar { width: 10px; height: 10px; }
     ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -85,8 +137,48 @@
                     class="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs leading-relaxed text-slate-800 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"></textarea>
         </div>
 
+        <!-- Chaos Lab: append realistic dirty CRM rows to the buffer -->
+        <div class="rounded-xl border border-fuchsia-200 bg-gradient-to-br from-fuchsia-50 via-white to-indigo-50 p-4 shadow-sm">
+          <div class="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <h2 class="text-sm font-semibold text-fuchsia-900">
+                2 · Chaos Lab
+                <span class="ml-1 rounded-full bg-fuchsia-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-fuchsia-700">live edge cases</span>
+              </h2>
+              <p class="mt-1 text-xs text-fuchsia-800/75">Append dirty rows to the buffer, then clean it to watch every transform fire.</p>
+            </div>
+            <span id="chaosStatus" class="rounded-full bg-white/90 px-2 py-1 text-[10px] font-semibold text-fuchsia-700 shadow-sm">Ready</span>
+          </div>
+          <div id="chaosChips" class="mt-3 flex flex-wrap gap-1.5" role="group" aria-label="Chaos categories">
+            <button type="button" class="chaos-chip" data-chaos="duplicates" aria-pressed="true">Case-variant duplicates</button>
+            <button type="button" class="chaos-chip" data-chaos="dates" aria-pressed="true">Bad dates</button>
+            <button type="button" class="chaos-chip" data-chaos="emails" aria-pressed="true">Broken emails</button>
+            <button type="button" class="chaos-chip" data-chaos="formulas" aria-pressed="true">Formula injection</button>
+            <button type="button" class="chaos-chip" data-chaos="ragged" aria-pressed="true">Ragged + blank rows</button>
+          </div>
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            <label for="chaosPreset" class="text-xs font-semibold text-fuchsia-900">Preset</label>
+            <select id="chaosPreset"
+                    class="rounded-lg border border-fuchsia-200 bg-white px-2 py-1.5 text-xs font-medium text-fuchsia-900 shadow-sm focus:border-fuchsia-500 focus:outline-none focus:ring-1 focus:ring-fuchsia-500">
+              <option value="all">Everything (all chaos)</option>
+              <option value="duplicates-dates">Duplicates + dates</option>
+              <option value="emails-formulas">Emails + formulas</option>
+              <option value="ragged">Quarantine only</option>
+              <option value="custom">Custom (use chips)</option>
+            </select>
+            <button id="injectBtn" type="button"
+                    class="inline-flex items-center gap-1.5 rounded-lg bg-fuchsia-700 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-fuchsia-800 focus:outline-none focus:ring-2 focus:ring-fuchsia-500 focus:ring-offset-2">
+              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="m13 2-9 12h7l-1 8 9-12h-7l1-8Z" />
+              </svg>
+              Inject Chaos
+            </button>
+            <span class="text-[11px] text-fuchsia-800/70">Mutates the textarea — nothing is sent until you press Clean CSV.</span>
+          </div>
+        </div>
+
         <div class="border-t border-slate-200 pt-5">
-          <h2 class="text-sm font-semibold text-slate-900">2 · Cleaning options</h2>
+          <h2 class="text-sm font-semibold text-slate-900">3 · Cleaning options</h2>
           <div class="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
               <label for="dedupeBy" class="block text-xs font-medium text-slate-600">dedupe_by</label>
@@ -207,8 +299,15 @@
         <div class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
           <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-4 py-3">
             <h3 class="text-sm font-semibold text-slate-800">Cleaned Rows <span id="cleanCount" class="ml-1 font-normal text-slate-400"></span></h3>
-            <span class="text-xs text-slate-400">empty cells shown as —</span>
+            <label class="flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-600">
+              <input id="changedOnly" type="checkbox"
+                     class="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500">
+              Changed cells only
+            </label>
           </div>
+          <p class="border-b border-indigo-100 bg-indigo-50/60 px-4 py-2 text-[11px] leading-relaxed text-indigo-800">
+            <span class="font-semibold">Before → after is inferred</span> by matching the raw CSV to the cleaned rows — the API returns no per-cell lineage. Unmatched rows stay unannotated rather than guessed. Empty cells shown as —.
+          </p>
           <div class="table-scroll overflow-auto">
             <table class="min-w-full divide-y divide-slate-200 text-sm">
               <thead id="cleanHead" class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500"></thead>
@@ -248,11 +347,15 @@
             </svg>
             <span id="downloadLabel">Download Clean CSV</span>
           </button>
+          <button id="quarantineDownloadBtn" type="button"
+                  class="inline-flex items-center gap-2 rounded-lg border border-rose-300 bg-rose-50 px-4 py-2.5 text-sm font-semibold text-rose-700 shadow-sm transition hover:bg-rose-100 focus:outline-none focus:ring-2 focus:ring-rose-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
+            Download Quarantined CSV
+          </button>
           <button id="zipBtn" type="button"
                   class="inline-flex items-center gap-2 rounded-lg border border-indigo-300 bg-indigo-50 px-4 py-2.5 text-sm font-semibold text-indigo-700 shadow-sm transition hover:bg-indigo-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
             Download ZIP Bundle
           </button>
-          <span class="text-xs text-slate-500">Re-generated by the API with the same options and input.</span>
+          <span class="text-xs text-slate-500">Clean CSV / ZIP are re-generated by the API with the same options; quarantined CSV is built in-browser from the JSON response.</span>
         </div>
 
         <details class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
@@ -264,6 +367,9 @@
       </section>
     </div>
   </main>
+
+  <div id="toast" role="status" aria-live="polite"
+       class="fixed bottom-5 right-5 z-50 hidden max-w-sm rounded-xl bg-slate-900 px-4 py-3 text-sm font-medium text-white shadow-xl"></div>
 
   <script>
     (function () {
@@ -283,6 +389,136 @@
         '',
         ''
       ].join('\n');
+
+      // State from the last successful JSON result, kept so diff rendering and
+      // the quarantined export never need a second network round-trip.
+      let lastPayload = null;
+      let lastRawText = '';
+      let lastHeaders = [];
+      let lastRawRows = [];
+      let lastMatches = [];
+      let toastTimer = null;
+
+      function showToast(message) {
+        const toast = $('toast');
+        toast.textContent = message;
+        toast.classList.remove('hidden');
+        if (toastTimer) window.clearTimeout(toastTimer);
+        toastTimer = window.setTimeout(() => toast.classList.add('hidden'), 3400);
+      }
+
+      // Small RFC-4180-ish CSV reader/writer for the *client-side* view only.
+      // The server remains authoritative for parsing, encoding and cleaning.
+      function parseCsv(text) {
+        const rows = [];
+        let row = [];
+        let field = '';
+        let quoted = false;
+        const input = String(text == null ? '' : text);
+        for (let i = 0; i < input.length; i++) {
+          const ch = input[i];
+          if (quoted) {
+            if (ch === '"') {
+              if (input[i + 1] === '"') { field += '"'; i++; }
+              else quoted = false;
+            } else {
+              field += ch;
+            }
+          } else if (ch === '"') {
+            quoted = true;
+          } else if (ch === ',') {
+            row.push(field);
+            field = '';
+          } else if (ch === '\n') {
+            row.push(field);
+            rows.push(row);
+            row = [];
+            field = '';
+          } else if (ch !== '\r') {
+            field += ch;
+          }
+        }
+        if (field.length || row.length) {
+          row.push(field);
+          rows.push(row);
+        }
+        return rows;
+      }
+
+      function encodeCsvCell(value) {
+        const text = value == null ? '' : String(value);
+        return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+      }
+
+      function encodeCsvRow(cells) {
+        return cells.map(encodeCsvCell).join(',');
+      }
+
+      function escapeFormulaCell(value) {
+        const text = value == null ? '' : String(value);
+        return /^[=+\-@]/.test(text) ? "'" + text : text;
+      }
+
+      function lowerList(value) {
+        return String(value || '').split(',')
+          .map((item) => item.trim().toLowerCase()).filter(Boolean);
+      }
+
+      function columnIndex(header, names) {
+        const wanted = new Set(names.map((name) => name.toLowerCase()));
+        return header.findIndex((name) => wanted.has(String(name).trim().toLowerCase()));
+      }
+
+      function reasonFor(header) {
+        const name = String(header || '').trim().toLowerCase();
+        if (lowerList($('emailColumns').value).includes(name)) return 'trimmed/lowercased';
+        if (lowerList($('dateColumns').value).includes(name)) return 'normalized date';
+        if (lowerList($('phoneColumns').value).includes(name)) return 'E.164 phone';
+        if (lowerList($('companyColumns').value).includes(name)) return 'company normalized';
+        return 'normalization';
+      }
+
+      // Match each cleaned row back to a raw row, in order. All transforms
+      // preserve row order and dedupe keeps the first occurrence, so a
+      // forward-only cursor naturally skips rows removed by deduplication.
+      // A conservative similarity threshold avoids inventing provenance.
+      function matchRows(rows, rawRows, quarantinedIndices) {
+        const width = lastHeaders.length || 1;
+        const eligible = rawRows.filter((raw) =>
+          !quarantinedIndices.has(raw.index) && raw.cells.length === width);
+        const matches = [];
+        let cursor = 0;
+        rows.forEach((row) => {
+          const target = lastHeaders.map((h) =>
+            String(row[h] == null ? '' : row[h]).trim().toLowerCase());
+          let best = null;
+          let bestScore = -1;
+          let bestPos = -1;
+          const limit = Math.min(eligible.length, cursor + 12);
+          for (let i = cursor; i < limit; i++) {
+            const candidate = eligible[i].cells.map((v) =>
+              String(v == null ? '' : v).trim().toLowerCase());
+            let score = 0;
+            for (let c = 0; c < width; c++) {
+              if (candidate[c] === target[c]) {
+                score += 1;
+              } else if (candidate[c] && target[c] &&
+                         (candidate[c].includes(target[c]) || target[c].includes(candidate[c]))) {
+                score += 0.5;
+              }
+            }
+            const ratio = score / width;
+            if (ratio > bestScore) { bestScore = ratio; best = eligible[i]; bestPos = i; }
+          }
+          if (best && bestScore >= 0.5) {
+            matches.push({ rawIndex: best.index, cells: best.cells });
+            cursor = bestPos + 1;
+          } else {
+            matches.push(null);
+          }
+        });
+        return matches;
+      }
 
       function showError(message) {
         $('errorBox').textContent = message;
@@ -367,6 +603,137 @@
       });
       $('csvText').addEventListener('input', clearError);
 
+      // --- Chaos Lab ---------------------------------------------------------
+      const CHAOS_HEADER = ['full_name', 'email', 'created_at', 'company'];
+      const CHAOS_PRESETS = {
+        all: ['duplicates', 'dates', 'emails', 'formulas', 'ragged'],
+        'duplicates-dates': ['duplicates', 'dates'],
+        'emails-formulas': ['emails', 'formulas'],
+        ragged: ['ragged']
+      };
+
+      function chaosRow(header) {
+        return header.map(() => '');
+      }
+
+      function setChaosCell(row, header, names, value) {
+        const index = columnIndex(header, names);
+        if (index >= 0) row[index] = value;
+        return row;
+      }
+
+      function chaosDuplicates(header, dataRows) {
+        const base = (dataRows.find((row) => row.some((cell) => String(cell).trim())) || []).slice();
+        const first = header.map((_, i) => base[i] == null ? '' : String(base[i]));
+        setChaosCell(first, header, ['full_name', 'name'], '  Alice Johnson  ');
+        setChaosCell(first, header, ['email'], '  ALICE@ACME.COM  ');
+        const variant = first.slice();
+        setChaosCell(variant, header, ['full_name', 'name'], 'Alice Johnson');
+        setChaosCell(variant, header, ['email'], 'alice@acme.com');
+        setChaosCell(variant, header, ['company'], ' ACME Inc ');
+        return [first, variant];
+      }
+
+      function chaosDates(header) {
+        return ['TBD', 'not-a-date', '03/04/2024'].map((value, i) => {
+          const row = chaosRow(header);
+          setChaosCell(row, header, ['full_name', 'name'], 'Date Tester ' + (i + 1));
+          setChaosCell(row, header, ['email'], 'date.tester' + (i + 1) + '@example.com');
+          setChaosCell(row, header, ['created_at', 'date', 'create date', 'createddate'], value);
+          setChaosCell(row, header, ['company'], 'Date Labs');
+          return row;
+        });
+      }
+
+      function chaosEmails(header) {
+        return ['missing@', '  BOB@EXAMPLE.COM  ', ''].map((value, i) => {
+          const row = chaosRow(header);
+          setChaosCell(row, header, ['full_name', 'name'], 'Email Tester ' + (i + 1));
+          setChaosCell(row, header, ['email'], value);
+          setChaosCell(row, header, ['created_at', 'date', 'create date', 'createddate'],
+            '2024-02-0' + (i + 1));
+          setChaosCell(row, header, ['company'], 'Mail Labs');
+          return row;
+        });
+      }
+
+      function chaosFormulas(header) {
+        return ['=SUM(A1:A2)', '@cmd', '+12345'].map((value, i) => {
+          const row = chaosRow(header);
+          setChaosCell(row, header, ['full_name', 'name'], 'Formula Tester ' + (i + 1));
+          setChaosCell(row, header, ['email'], 'formula' + (i + 1) + '@example.com');
+          setChaosCell(row, header, ['created_at', 'date', 'create date', 'createddate'],
+            '2024-03-0' + (i + 1));
+          setChaosCell(row, header, ['company'], value);
+          return row;
+        });
+      }
+
+      function chaosRagged(header) {
+        const ragged = header.map((_, i) => 'ragged-' + (i + 1));
+        ragged.push('unexpected-extra-field');
+        const short = header.slice(0, Math.max(1, header.length - 1))
+          .map((_, i) => 'short-' + (i + 1));
+        return [ragged, short, chaosRow(header)];
+      }
+
+      function selectedChaos() {
+        return Array.from(document.querySelectorAll('#chaosChips .chaos-chip'))
+          .filter((chip) => chip.getAttribute('aria-pressed') === 'true')
+          .map((chip) => chip.dataset.chaos);
+      }
+
+      function syncChaosChips(categories) {
+        document.querySelectorAll('#chaosChips .chaos-chip').forEach((chip) => {
+          chip.setAttribute('aria-pressed',
+            categories.includes(chip.dataset.chaos) ? 'true' : 'false');
+        });
+      }
+
+      $('chaosPreset').addEventListener('change', (event) => {
+        const categories = CHAOS_PRESETS[event.target.value];
+        if (categories) syncChaosChips(categories);
+      });
+      $('chaosChips').addEventListener('click', (event) => {
+        const chip = event.target.closest('.chaos-chip');
+        if (!chip) return;
+        chip.setAttribute('aria-pressed',
+          chip.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+        $('chaosPreset').value = 'custom';
+      });
+
+      $('injectBtn').addEventListener('click', () => {
+        const parsed = parseCsv($('csvText').value);
+        const hasHeader = parsed.length > 0 && parsed[0].length > 0 &&
+          parsed[0].some((cell) => String(cell).trim());
+        const header = hasHeader
+          ? parsed[0].map((cell) => String(cell).trim())
+          : CHAOS_HEADER.slice();
+        const generators = {
+          duplicates: () => chaosDuplicates(header, parsed.slice(1)),
+          dates: () => chaosDates(header),
+          emails: () => chaosEmails(header),
+          formulas: () => chaosFormulas(header),
+          ragged: () => chaosRagged(header)
+        };
+        const additions = [];
+        selectedChaos().forEach((category) => {
+          if (generators[category]) additions.push(...generators[category]());
+        });
+        if (!additions.length) {
+          $('chaosStatus').textContent = 'No categories selected';
+          showToast('Pick at least one chaos category first.');
+          return;
+        }
+        const parts = [$('csvText').value.replace(/\s*$/, '')];
+        if (!hasHeader) parts.push(encodeCsvRow(header));
+        additions.forEach((row) => parts.push(encodeCsvRow(row)));
+        $('csvText').value = parts.filter(Boolean).join('\r\n') + '\r\n';
+        clearError();
+        $('chaosStatus').textContent = '+' + additions.length + ' rows injected';
+        showToast('Injected ' + additions.length + ' chaotic rows — press Clean CSV to see the transforms.');
+      });
+
       // --- Request helpers ---------------------------------------------------
       function appendList(form, key, value) {
         value.split(',').map((item) => item.trim()).filter(Boolean)
@@ -434,8 +801,58 @@
         return td;
       }
 
+      function displayValue(value) {
+        return value === null || value === undefined || value === ''
+          ? '—' : String(value);
+      }
+
+      // Returns true when a confident raw→clean change was rendered.
+      function renderCleanCell(td, header, afterValue, beforeValue, matched) {
+        const before = beforeValue === null || beforeValue === undefined
+          ? '' : String(beforeValue);
+        const after = afterValue === null || afterValue === undefined
+          ? '' : String(afterValue);
+        // Compare literal text: case-folding and trimming are themselves
+        // transforms the reviewer needs to see.
+        const changed = !!matched && before !== after;
+        if (!changed) {
+          td.textContent = displayValue(afterValue);
+          if (after === '') td.classList.add('italic', 'text-slate-400');
+          // JSON deliberately keeps formula-like text verbatim (ADR-0004);
+          // flag it for review without claiming it was sanitized here.
+          if (matched && /^[=+\-@]/.test(before)) {
+            const flag = document.createElement('span');
+            flag.className = 'reason-pill formula ml-1';
+            flag.textContent = 'formula-like · escaped in CSV export';
+            td.appendChild(flag);
+          }
+          return false;
+        }
+        td.classList.add('bg-emerald-50/50');
+        const afterEl = document.createElement('div');
+        afterEl.className = 'diff-after';
+        afterEl.textContent = displayValue(afterValue);
+        const line = document.createElement('div');
+        line.className = 'mt-1 flex flex-wrap items-center gap-1.5';
+        const beforeEl = document.createElement('span');
+        beforeEl.className = 'diff-before';
+        beforeEl.textContent = displayValue(beforeValue);
+        const arrow = document.createElement('span');
+        arrow.className = 'text-[10px] text-slate-400';
+        arrow.textContent = '→';
+        const reason = document.createElement('span');
+        const formula = /^[=+\-@]/.test(before);
+        reason.className = formula ? 'reason-pill formula' : 'reason-pill';
+        reason.textContent = formula
+          ? 'formula-like · escaped in CSV export'
+          : reasonFor(header);
+        line.append(beforeEl, arrow, reason);
+        td.append(afterEl, line);
+        return true;
+      }
+
       function renderCleanTable(rows) {
-        const columns = [];
+        const columns = lastHeaders.length ? lastHeaders.slice() : [];
         rows.forEach((row) => Object.keys(row).forEach((key) => {
           if (!columns.includes(key)) columns.push(key);
         }));
@@ -452,22 +869,49 @@
         });
         head.appendChild(headRow);
 
+        const changedOnly = $('changedOnly').checked;
         const body = $('cleanBody');
         body.replaceChildren();
+        let changedCells = 0;
+        let visible = 0;
         if (!rows.length) {
           const tr = document.createElement('tr');
           const td = cell(tr, 'No cleaned rows.', 'px-4 py-6 text-center text-slate-400');
           td.colSpan = Math.max(columns.length, 1);
           body.appendChild(tr);
         } else {
-          rows.forEach((row) => {
+          rows.forEach((row, rowIndex) => {
+            const match = lastMatches[rowIndex] || null;
             const tr = document.createElement('tr');
             tr.className = 'hover:bg-slate-50';
-            columns.forEach((name) => cell(tr, row[name]));
+            let rowChanged = 0;
+            columns.forEach((name, colIndex) => {
+              const td = document.createElement('td');
+              td.className = 'px-4 py-2 align-top whitespace-nowrap';
+              const before = match && match.cells[colIndex] !== undefined
+                ? match.cells[colIndex] : null;
+              if (renderCleanCell(td, name, row[name], before, match)) rowChanged++;
+              tr.appendChild(td);
+            });
+            changedCells += rowChanged;
+            if (changedOnly && rowChanged === 0) return;
+            visible++;
             body.appendChild(tr);
           });
         }
-        $('cleanCount').textContent = '(' + rows.length + (rows.length === 1 ? ' row)' : ' rows)');
+        if (changedOnly && visible === 0 && rows.length) {
+          const tr = document.createElement('tr');
+          const td = cell(tr,
+            'No confidently matched cell changes. Turn the toggle off to see every row.',
+            'px-4 py-6 text-center text-slate-400');
+          td.colSpan = Math.max(columns.length, 1);
+          body.appendChild(tr);
+        }
+        const suffix = changedCells
+          ? ' · ' + changedCells + ' cell' + (changedCells === 1 ? '' : 's') + ' changed'
+          : '';
+        $('cleanCount').textContent =
+          '(' + rows.length + (rows.length === 1 ? ' row)' : ' rows)') + suffix;
       }
 
       function renderQuarantineTable(rows) {
@@ -484,21 +928,63 @@
             tr.className = 'hover:bg-rose-50/40';
             const indexTd = cell(tr, row.row_index, 'whitespace-nowrap px-4 py-2 font-mono text-slate-600');
             indexTd.classList.add('align-top');
-            const raw = Array.isArray(row.record) ? JSON.stringify(row.record) : String(row.record == null ? '' : row.record);
-            const rawTd = cell(tr, raw, 'px-4 py-2 font-mono text-xs text-slate-700');
-            rawTd.classList.add('break-all', 'align-top');
-            const errors = Array.isArray(row.errors) ? row.errors.join(' · ') : String(row.errors || '');
-            const errTd = cell(tr, errors, 'px-4 py-2 text-xs text-rose-700');
-            errTd.classList.add('align-top');
+
+            const rawTd = document.createElement('td');
+            rawTd.className = 'px-4 py-2 font-mono text-xs text-slate-700 align-top';
+            const record = Array.isArray(row.record) ? row.record : [row.record];
+            if (lastHeaders.length && record.length === lastHeaders.length) {
+              const list = document.createElement('div');
+              list.className = 'flex flex-col gap-0.5';
+              lastHeaders.forEach((name, i) => {
+                const line = document.createElement('div');
+                const key = document.createElement('span');
+                key.className = 'text-slate-400';
+                key.textContent = name + ': ';
+                const value = document.createElement('span');
+                value.textContent = displayValue(record[i]);
+                line.append(key, value);
+                list.appendChild(line);
+              });
+              rawTd.appendChild(list);
+            } else {
+              rawTd.textContent = JSON.stringify(row.record);
+              rawTd.classList.add('break-all');
+            }
+            tr.appendChild(rawTd);
+
+            const errTd = document.createElement('td');
+            errTd.className = 'px-4 py-2 align-top';
+            const errors = Array.isArray(row.errors) ? row.errors : [row.errors];
+            errors.filter(Boolean).forEach((message) => {
+              const pill = document.createElement('span');
+              pill.className = 'error-pill mb-1 mr-1';
+              pill.textContent = String(message);
+              errTd.appendChild(pill);
+            });
+            if (!errTd.childNodes.length) errTd.textContent = '—';
+            tr.appendChild(errTd);
             body.appendChild(tr);
           });
         }
         $('quarantineCount').textContent = '(' + rows.length + (rows.length === 1 ? ' row)' : ' rows)');
       }
 
-      function renderResults(payload) {
+      function renderResults(payload, rawText) {
         const summary = payload.summary || {};
         const quarantined = Array.isArray(payload.quarantined) ? payload.quarantined : [];
+        const data = Array.isArray(payload.data) ? payload.data : [];
+
+        // Rebuild the raw-row index from the exact text that was submitted.
+        lastPayload = payload;
+        lastRawText = rawText == null ? $('csvText').value : rawText;
+        const parsed = parseCsv(lastRawText);
+        lastHeaders = parsed.length && parsed[0].length
+          ? parsed[0].map((cell) => String(cell).replace(/^\ufeff/, '').trim())
+          : Object.keys(data[0] || {});
+        lastRawRows = parsed.slice(1).map((cells, index) => ({ index, cells }));
+        const quarantinedIndices = new Set(quarantined.map((row) => Number(row.row_index)));
+        lastMatches = matchRows(data, lastRawRows, quarantinedIndices);
+
         const fixes = summary.fixes_applied || {};
         const fixEntries = Object.entries(fixes);
         const fixTotal = fixEntries.reduce((sum, entry) => sum + (Number(entry[1]) || 0), 0);
@@ -547,7 +1033,7 @@
         $('warningsText').textContent =
           'Warnings: ' + malformed + ' malformed' + (unknown ? ' · ignored columns: ' + unknown : '');
 
-        renderCleanTable(Array.isArray(payload.data) ? payload.data : []);
+        renderCleanTable(data);
         renderQuarantineTable(quarantined);
         $('jsonPreview').textContent = JSON.stringify(payload, null, 2);
 
@@ -574,8 +1060,11 @@
             payload.summary = payload.summary || {};
             payload.summary.processing_time_ms = Number(headerTiming);
           }
+          // The server sample and this inline sample are kept in sync; loading
+          // it here gives the diff view a raw source to match against.
+          $('csvText').value = SAMPLE_CSV;
           $('fileName').textContent = 'messy-leads.csv (server demo)';
-          renderResults(payload);
+          renderResults(payload, SAMPLE_CSV);
         } catch (error) {
           showError('Could not run the server demo: ' + (error && error.message ? error.message : String(error)));
         } finally {
@@ -593,10 +1082,11 @@
         clearError();
         setBusy($('submitBtn'), 'submitSpinner', null, 'submitLabel', true, 'Cleaning…', 'Clean CSV');
         $('downloadBtn').disabled = true;
+        const submittedText = $('csvText').value;
         try {
           const response = await fetch('/clean/csv', { method: 'POST', body: buildForm('json') });
           if (!response.ok) throw new Error(await apiError(response));
-          renderResults(await response.json());
+          renderResults(await response.json(), submittedText);
         } catch (error) {
           showError('Could not clean the CSV: ' + (error && error.message ? error.message : String(error)));
         } finally {
@@ -667,6 +1157,56 @@
           button.disabled = false;
           button.textContent = label;
         }
+      });
+
+      // --- Local export & view toggle ---------------------------------------
+      // Mirrors the API's quarantined.csv bundle layout: row_index, errors,
+      // then the original header columns — with formula escaping for spreadsheets.
+      function buildQuarantinedCsv(payload) {
+        const headers = lastHeaders.length ? lastHeaders : [];
+        const lines = [encodeCsvRow(['row_index', 'errors', ...headers])];
+        const rows = payload && Array.isArray(payload.quarantined) ? payload.quarantined : [];
+        rows.forEach((row) => {
+          const record = Array.isArray(row.record) ? row.record.slice() : [row.record];
+          const cells = record.slice(0, headers.length);
+          while (cells.length < headers.length) cells.push('');
+          const errors = Array.isArray(row.errors)
+            ? row.errors.join('; ') : String(row.errors || '');
+          lines.push(encodeCsvRow([
+            escapeFormulaCell(row.row_index),
+            escapeFormulaCell(errors),
+            ...cells.map(escapeFormulaCell)
+          ]));
+        });
+        return lines.join('\r\n') + '\r\n';
+      }
+
+      function downloadBlob(content, filename) {
+        const blob = new Blob([content], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+
+      $('changedOnly').addEventListener('change', () => {
+        if (!lastPayload) return;
+        renderCleanTable(Array.isArray(lastPayload.data) ? lastPayload.data : []);
+      });
+
+      $('quarantineDownloadBtn').addEventListener('click', () => {
+        if (!lastPayload) {
+          showError('Run the cleaner once to load quarantined rows into the page.');
+          return;
+        }
+        const count = (lastPayload.quarantined || []).length;
+        downloadBlob('\ufeff' + buildQuarantinedCsv(lastPayload), 'quarantined.csv');
+        showToast('Downloaded quarantined.csv (' + count + (count === 1 ? ' row)' : ' rows)') +
+          ' — built in-browser from the JSON response.');
       });
     })();
   </script>

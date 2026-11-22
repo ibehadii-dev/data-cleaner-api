@@ -34,7 +34,7 @@ FastAPI microservice that cleans messy CRM/lead CSV exports and validates JSON p
 
 ## UI (`static/index.html`)
 
-Tailwind CSS via CDN + vanilla JavaScript, no build step. Drag-and-drop or browse for a CSV, editable raw textarea synced with file/sample, "Load Messy Sample", "Clear" and "Run Server Demo (/demo/messy-leads)". Option controls include preset, phone/company columns, country code, fuzzy dedupe and case-insensitive dedupe. Results show a reconciliation bar (`rows_in`, `rows_out`, `rows_dropped`, quarantined count, `fixes_applied` chips, timing badge, ✓ reconciled/⚠ mismatch), a cleaned-rows table, a quarantined-rows table (row index / raw data / errors), "Download Clean CSV", "Download ZIP Bundle", and a collapsible full JSON preview. Loading/disabled states and an `aria-live` error alert cover failures; all row data is rendered with `textContent` to avoid HTML injection.
+Tailwind CSS via CDN + vanilla JavaScript, no build step. Drag-and-drop or browse for a CSV, editable raw textarea synced with file/sample, "Load Messy Sample", "Clear" and "Run Server Demo (/demo/messy-leads)"; the demo button also loads the matching inline sample so the diff view has raw rows to match against. A "Chaos Lab" panel adds category chips (case-variant duplicates, bad dates, broken emails, formula injection, ragged/blank rows) plus presets and an "Inject Chaos" button that appends ~14 realistic dirty rows to the textarea via a small client-side CSV parser/encoder. Option controls include preset, phone/company columns, country code, fuzzy dedupe and case-insensitive dedupe. Results show a reconciliation bar (`rows_in`, `rows_out`, `rows_dropped`, quarantined count, `fixes_applied` chips, timing badge, ✓ reconciled/⚠ mismatch), a cleaned-rows table, a quarantined-rows table (row index / header-keyed raw values / individual error pills), "Download Clean CSV", "Download Quarantined CSV" (built in-browser from the JSON response in the ZIP bundle's `row_index, errors, *headers` layout), "Download ZIP Bundle", and a collapsible full JSON preview. The cleaned table infers before/after cell diffs by matching raw rows to cleaned rows in order (server returns no per-cell lineage); changed cells show the literal before value, after value and a rule-based reason, with a "Changed cells only" toggle. Formula-like cells are flagged as such without claiming they were sanitized in JSON (ADR-0004). Loading/disabled states, a success toast and an `aria-live` error alert cover failures; all row data is rendered with `textContent` to avoid HTML injection.
 
 ## Data schemas & invariants
 
@@ -61,6 +61,7 @@ Tailwind CSS via CDN + vanilla JavaScript, no build step. Drag-and-drop or brows
 3. `b382dd4` — E.164 phone normalization, HubSpot/Salesforce presets, ZIP bundle export.
 4. `e12a68a` — company entity normalization and fuzzy deduplication.
 5. `fe036e8` — six ADRs documenting the contracts and trade-offs.
+6. Uncommitted — UI "wow-factor" pass in `static/index.html`: Chaos Lab injection, inferred cell-level before/after diffs with changed-only toggle, quarantine reason pills, and a client-generated quarantined CSV export. Backend contracts untouched.
 
 ## Known bugs / tech debt / deferred edge cases
 
@@ -73,6 +74,7 @@ Tailwind CSS via CDN + vanilla JavaScript, no build step. Drag-and-drop or brows
 7. **UI maintenance:** Tailwind is a runtime CDN dependency (offline/CDN-blocked deployments render unstyled), and the dirty sample must stay in sync in three places — `test_messy_leads.csv`, `FALLBACK_MESSY_LEADS_CSV` in `app/routers/demo.py`, and `SAMPLE_CSV` in `static/index.html`.
 8. `processing_time_ms` is measured inside the pure service functions, so it excludes HTTP parsing and response serialization.
 9. `read_csv_bytes()` is a frame-only wrapper; callers needing quarantine reasons must use `read_csv_bytes_with_quarantine()`.
+10. **UI cell diffs are heuristic.** The API returns no per-cell lineage or source indices for cleaned rows, so `static/index.html` re-parses the submitted text and matches rows in order with a conservative similarity score. Unmatched rows are left unannotated; reason tags are inferred from the configured column roles, not returned by the server.
 
 ## Next 3 steps
 
