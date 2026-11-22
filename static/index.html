@@ -63,6 +63,47 @@
       font-weight: 600;
       color: #be123c;
     }
+    /* Intro credit badge: subtle glass card, fixed + non-interactive. */
+    #introBadge {
+      position: fixed;
+      top: 1rem;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 60;
+      pointer-events: none;
+      display: inline-flex;
+      align-items: center;
+      gap: .4rem;
+      border-radius: 9999px;
+      border: 1px solid rgba(148, 163, 184, .35);
+      background: rgba(255, 255, 255, .78);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      padding: .35rem .8rem;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: .02em;
+      color: #64748b;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, .08);
+      opacity: 0;
+      animation: introBadgeFade 3.3s ease-in-out forwards;
+    }
+    #introBadge .intro-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 9999px;
+      background: #a5b4fc;
+    }
+    /* ~0.3s fade in, ~2.2s hold, ~0.8s fade out. */
+    @keyframes introBadgeFade {
+      0%   { opacity: 0; }
+      9%   { opacity: 1; }
+      76%  { opacity: 1; }
+      100% { opacity: 0; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #introBadge { animation: none; opacity: 1; }
+    }
     ::-webkit-scrollbar { width: 10px; height: 10px; }
     ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -370,6 +411,12 @@
 
   <div id="toast" role="status" aria-live="polite"
        class="fixed bottom-5 right-5 z-50 hidden max-w-sm rounded-xl bg-slate-900 px-4 py-3 text-sm font-medium text-white shadow-xl"></div>
+
+  <!-- Intro credit badge: fades in/out on load, fixed and non-interactive -->
+  <div id="introBadge" role="status" aria-label="a project by ibehadii">
+    <span class="intro-dot" aria-hidden="true"></span>
+    <span>a project by ibehadii</span>
+  </div>
 
   <script>
     (function () {
@@ -1208,6 +1255,25 @@
         showToast('Downloaded quarantined.csv (' + count + (count === 1 ? ' row)' : ' rows)') +
           ' — built in-browser from the JSON response.');
       });
+
+      // --- Intro credit badge ------------------------------------------------
+      // The CSS keyframes drive the fade; JS just hides the node once done so
+      // it leaves the accessibility tree and never lingers over the page.
+      (function initIntroBadge() {
+        const badge = $('introBadge');
+        if (!badge) return;
+        const finish = () => badge.classList.add('hidden');
+        const reduce = window.matchMedia &&
+          window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (reduce) {
+          // No animation to listen for: hold briefly, then hide without motion.
+          window.setTimeout(finish, 2200);
+        } else {
+          badge.addEventListener('animationend', finish, { once: true });
+          // Safety net if animationend never fires (e.g. backgrounded tab).
+          window.setTimeout(finish, 3600);
+        }
+      })();
     })();
   </script>
 </body>
